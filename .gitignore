@@ -1,0 +1,24 @@
+# Secrets
+.env
+
+# Maven build output
+target/
+**/target/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# Logs
+*.log
+logs/
+
+# Temporary / archive files
+*.zip
+# Internal project notes
+AGENTS.md
+MASTER-HANDOFF.md
+P5-DLT-HANDOFF.md
+PROJECT-ROADMAP.md
+# Separate experimental project
+aryan-notification-spring-boot-starter/
