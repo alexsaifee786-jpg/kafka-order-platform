@@ -112,6 +112,15 @@ flowchart LR
 - If the service goes down, Grafana sends an email alert through Gmail SMTP.
 - When the service becomes healthy again, Grafana sends a resolved notification.
 - Grafana data is stored in a persistent Docker volume so dashboards and alert configuration survive container recreation.
+## Key Engineering Decisions
+
+- **Manual Kafka acknowledgment** is used so an offset is acknowledged only after successful business processing.
+- **Idempotency** prevents duplicate Kafka delivery from updating inventory more than once.
+- **Database transactions** keep inventory updates and processed-event tracking consistent.
+- **Retry + DLT** isolates repeatedly failing records without blocking normal event processing.
+- **Avro + Schema Registry** provides schema-based communication between producer and consumer.
+- **Prometheus + Grafana** provides runtime visibility and service-down alerting.
+- **Docker volumes** preserve Kafka and Grafana data across container recreation.
 ## How to Run
 
 ### Prerequisites
