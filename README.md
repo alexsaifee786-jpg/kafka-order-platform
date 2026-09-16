@@ -27,8 +27,19 @@ Prometheus and Grafana with email alerts for service failures.
 - Micrometer
 - Prometheus
 - Grafana
-- ## Architecture
+## Project Structure
 
+```text
+kafka-order-platform/
+├── order-service/        # Produces order events
+├── inventory-service/    # Consumes events and updates inventory
+├── monitoring/           # Prometheus configuration
+├── scripts/              # DLT and failure-testing scripts
+├── docs/screenshots/     # Runtime proof screenshots
+├── docker-compose.yml    # Kafka, Schema Registry, Prometheus and Grafana
+├── .env.example          # Environment variable template
+└── README.md
+## Architecture
 ```mermaid
 flowchart LR
     Client[Client / Postman]
@@ -61,6 +72,32 @@ flowchart LR
     Prometheus --> Grafana
     Grafana --> Email
 ```
+## Key Interview Concepts
+
+- Kafka producer and consumer flow
+- Kafka partitions, offsets and consumer groups
+- Manual acknowledgment
+- At-least-once delivery
+- Idempotent event processing
+- Database transaction boundaries
+- Retry and Dead Letter Topic (DLT)
+- Avro serialization and Schema Registry
+- Transactional Outbox pattern
+- Consumer failure and recovery
+- Prometheus metrics
+- Grafana monitoring and alerting## Production Scenarios Covered
+
+- Duplicate Kafka event delivery without duplicate inventory updates
+- Consumer failure before acknowledgment
+- Retry of temporarily failed records
+- Repeated failure routed to DLT
+- DLT inspection and replay support
+- Schema-based Avro event communication
+- Database transaction with processed-event tracking
+- Transactional Outbox based event publishing
+- Service health and JVM monitoring
+- Service DOWN email alert and recovery notification
+
 ## Normal Processing Flow
 
 1. Client sends an order request to `order-service`.
