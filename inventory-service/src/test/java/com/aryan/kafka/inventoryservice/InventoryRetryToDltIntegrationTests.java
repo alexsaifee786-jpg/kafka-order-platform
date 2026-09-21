@@ -1,5 +1,5 @@
 package com.aryan.kafka.inventoryservice;
-
+import org.springframework.test.context.ActiveProfiles;
 import com.aryan.kafka.inventoryservice.event.OrderCreatedEvent;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}",
         "spring.kafka.consumer.group-id=inventory-dlt-integration-test"
 })
+@ActiveProfiles("test")
 class InventoryRetryToDltIntegrationTests {
 
     private static final String SOURCE_TOPIC = "orders.created";
