@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest(properties = {
-        "spring.datasource.url=jdbc:mysql://localhost:3306/inventory_test_db",
+        "spring.datasource.url=${TEST_DB_URL:jdbc:mysql://localhost:3306/inventory_test_db}",
         "spring.jpa.hibernate.ddl-auto=create-drop",
         "spring.kafka.listener.auto-startup=false"
 })
