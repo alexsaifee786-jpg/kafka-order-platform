@@ -1,5 +1,6 @@
 package com.aryan.kafka.inventoryservice;
 import io.confluent.kafka.serializers.KafkaAvroDeserializer;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.test.context.ActiveProfiles;
 import com.aryan.kafka.avro.OrderCreatedEvent;
 import org.apache.kafka.clients.consumer.Consumer;
@@ -34,7 +35,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestPropertySource(properties = {
         "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}",
         "spring.kafka.consumer.group-id=inventory-dlt-integration-test",
-        "spring.kafka.listener.auto-startup=true"
+        "spring.kafka.listener.auto-startup=true",
+        "spring.kafka.producer.properties.schema.registry.url=${TEST_SCHEMA_REGISTRY_URL:http://localhost:8081}",
+        "spring.kafka.consumer.properties.schema.registry.url=${TEST_SCHEMA_REGISTRY_URL:http://localhost:8081}"
 })
 @ActiveProfiles("test")
 class InventoryRetryToDltIntegrationTests {
@@ -46,7 +49,8 @@ class InventoryRetryToDltIntegrationTests {
 
     @Autowired
     private EmbeddedKafkaBroker embeddedKafkaBroker;
-
+    @Value("${spring.kafka.consumer.properties.schema.registry.url}")
+    private String schemaRegistryUrl;
     @Test
     void failedInventoryEventIsPublishedToDltWithFailureMetadata() {
         Map<String, Object> consumerProperties =
@@ -54,7 +58,7 @@ class InventoryRetryToDltIntegrationTests {
 
         KafkaAvroDeserializer valueDeserializer =
                 new KafkaAvroDeserializer();
-        consumerProperties.put("schema.registry.url", "http://localhost:8081");
+        consumerProperties.put("schema.registry.url", schemaRegistryUrl);
         consumerProperties.put("specific.avro.reader", true);
 
         try (Consumer<String, Object> dltConsumer =
