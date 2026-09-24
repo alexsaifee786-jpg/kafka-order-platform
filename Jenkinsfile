@@ -109,5 +109,22 @@ stage('Deploy Inventory Service') {
         '''
     }
 }
+stage('Health Check') {
+    steps {
+        sh '''
+            echo "Checking Order Service..."
+            curl -s --fail --retry 15 --retry-delay 2 --retry-connrefused \
+              http://host.docker.internal:8080/actuator/health | grep -q '"status":"UP"'
+
+            echo "Order Service is healthy"
+
+            echo "Checking Inventory Service..."
+            curl -s --fail --retry 15 --retry-delay 2 --retry-connrefused \
+              http://host.docker.internal:8082/actuator/health | grep -q '"status":"UP"'
+
+            echo "Inventory Service is healthy"
+        '''
+    }
+}
     }
 }
