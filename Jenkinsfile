@@ -75,5 +75,39 @@ pipeline {
               ok: 'Deploy'
             }
         }
+        stage('Deploy Order Service') {
+    steps {
+        sh '''
+            docker rm -f order-service-container || true
+
+            docker run -d \
+              --name order-service-container \
+              --network kafka-order-platform_default \
+              -p 8080:8080 \
+              -e SPRING_DATASOURCE_URL=jdbc:mysql://host.docker.internal:3306/order_db \
+              -e SPRING_KAFKA_BOOTSTRAP_SERVERS=kop-kafka-1:19092,kop-kafka-2:19092,kop-kafka-3:19092 \
+              -e SPRING_KAFKA_PRODUCER_PROPERTIES_SCHEMA_REGISTRY_URL=http://kop-schema-registry:8081 \
+              order-service:${BUILD_NUMBER}
+        '''
+    }
+}
+
+stage('Deploy Inventory Service') {
+    steps {
+        sh '''
+            docker rm -f inventory-service-container || true
+
+            docker run -d \
+              --name inventory-service-container \
+              --network kafka-order-platform_default \
+              -p 8082:8082 \
+              -e SPRING_DATASOURCE_URL=jdbc:mysql://host.docker.internal:3306/inventory_db \
+              -e SPRING_KAFKA_BOOTSTRAP_SERVERS=kop-kafka-1:19092,kop-kafka-2:19092,kop-kafka-3:19092 \
+              -e SPRING_KAFKA_PRODUCER_PROPERTIES_SCHEMA_REGISTRY_URL=http://kop-schema-registry:8081 \
+              -e SPRING_KAFKA_CONSUMER_PROPERTIES_SCHEMA_REGISTRY_URL=http://kop-schema-registry:8081 \
+              inventory-service:${BUILD_NUMBER}
+        '''
+    }
+}
     }
 }
