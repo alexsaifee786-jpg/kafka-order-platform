@@ -1,8 +1,7 @@
 pipeline {
     agent any
 
-    stages {
-
+    stages  {
         stage('Checkout') {
             steps {
                 git branch: 'main',
@@ -60,15 +59,21 @@ pipeline {
             }
         }
         stage('Build Order Docker Image') {
-    steps {
-        sh 'docker build -t order-service:${BUILD_NUMBER} ./order-service'
-    }
-}
+            steps {
+                sh 'docker build -t order-service:${BUILD_NUMBER} ./order-service'
+            }
+        }
 
-stage('Build Inventory Docker Image') {
-    steps {
-        sh 'docker build -t inventory-service:${BUILD_NUMBER} ./inventory-service'
-    }
-}
+        stage('Build Inventory Docker Image') {
+            steps {
+                sh 'docker build -t inventory-service:${BUILD_NUMBER} ./inventory-service'
+            }
+        }
+        stage('Approval for Deploy') {
+            steps {
+                input message: "Deploy Build #${BUILD_NUMBER} to local environment?",
+              ok: 'Deploy'
+            }
+        }
     }
 }
