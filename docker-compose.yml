@@ -23,7 +23,7 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 12
       start_period: 30s
 
@@ -51,7 +51,7 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 12
       start_period: 30s
 
@@ -79,7 +79,7 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 12
       start_period: 30s
 
@@ -117,13 +117,7 @@ services:
 
       - "3000:3000"
     environment:
-      GF_SMTP_ENABLED: "true"
-      GF_SMTP_HOST: "smtp.gmail.com:587"
-      GF_SMTP_USER: "${GRAFANA_SMTP_USER}"
-      GF_SMTP_PASSWORD: "${GRAFANA_SMTP_PASSWORD}"
-      GF_SMTP_FROM_ADDRESS: "${GRAFANA_SMTP_FROM_ADDRESS}"
-      GF_SMTP_FROM_NAME: "Kafka Order Platform Grafana"
-      GF_SMTP_STARTTLS_POLICY: "MandatoryStartTLS"
+      GF_SMTP_ENABLED: "false"
 volumes:
   kop-kafka-1-data:
   kop-kafka-2-data:
