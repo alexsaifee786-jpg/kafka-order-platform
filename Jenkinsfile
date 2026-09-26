@@ -113,16 +113,36 @@ stage('Health Check') {
     steps {
         sh '''
             echo "Checking Order Service..."
-            curl -s --fail --retry 30 --retry-delay 3 --retry-connrefused \
-              http://host.docker.internal:8080/actuator/health | grep -q '"status":"UP"'
 
-            echo "Order Service is healthy"
+            for i in $(seq 1 30); do
+                if curl -s --fail http://host.docker.internal:8080/actuator/health | grep -q '"status":"UP"'; then
+                    echo "Order Service is healthy"
+                    break
+                fi
+
+                if [ "$i" -eq 30 ]; then
+                    echo "Order Service health check failed"
+                    exit 1
+                fi
+
+                sleep 3
+            done
 
             echo "Checking Inventory Service..."
-            curl -s --fail --retry 30 --retry-delay 3 --retry-connrefused \
-              http://host.docker.internal:8082/actuator/health | grep -q '"status":"UP"'
 
-            echo "Inventory Service is healthy"
+            for i in $(seq 1 30); do
+                if curl -s --fail http://host.docker.internal:8082/actuator/health | grep -q '"status":"UP"'; then
+                    echo "Inventory Service is healthy"
+                    break
+                fi
+
+                if [ "$i" -eq 30 ]; then
+                    echo "Inventory Service health check failed"
+                    exit 1
+                fi
+
+                sleep 3
+            done
         '''
     }
 }
