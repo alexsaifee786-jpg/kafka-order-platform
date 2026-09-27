@@ -31,6 +31,8 @@ public class OrderEventProducer {
             OrderCreatedEvent event) {
 
         String messageKey = String.valueOf(event.getOrderId());
+        log.info("Sending order event to Kafka: eventId={}, topic={}, orderId={}",
+                event.getEventId(), topicName, event.getOrderId());
 
         CompletableFuture<SendResult<String, OrderCreatedEvent>> future =
                 kafkaTemplate.send(topicName, messageKey, event);
@@ -46,8 +48,10 @@ public class OrderEventProducer {
                 );
             } else {
                 log.error(
-                        "Failed to publish order event: eventId={}",
+                        "Failed to publish order event: eventId={}, topic={}, orderId={}",
                         event.getEventId(),
+                        topicName,
+                        event.getOrderId(),
                         exception
                 );
             }

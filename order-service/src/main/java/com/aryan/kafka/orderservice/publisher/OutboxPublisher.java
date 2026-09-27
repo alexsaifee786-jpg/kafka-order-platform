@@ -7,12 +7,14 @@ import com.aryan.kafka.orderservice.repository.OutboxEventRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 @Component
 public class OutboxPublisher {
@@ -23,15 +25,21 @@ public class OutboxPublisher {
     private final OutboxEventRepository outboxEventRepository;
     private final OrderEventProducer orderEventProducer;
     private final ObjectMapper objectMapper;
+    private final long publishTimeoutMs;
 
     public OutboxPublisher(
             OutboxEventRepository outboxEventRepository,
             OrderEventProducer orderEventProducer,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            @Value("${app.outbox.publish-timeout-ms:130000}") long publishTimeoutMs) {
 
         this.outboxEventRepository = outboxEventRepository;
         this.orderEventProducer = orderEventProducer;
         this.objectMapper = objectMapper;
+        if (publishTimeoutMs <= 0) {
+            throw new IllegalArgumentException("Outbox publish timeout must be positive");
+        }
+        this.publishTimeoutMs = publishTimeoutMs;
     }
 
     @Scheduled(fixedDelay = 1000)
@@ -41,12 +49,17 @@ public class OutboxPublisher {
                 outboxEventRepository.findByStatusOrderByCreatedAtAsc("PENDING");
 
         for (OutboxEvent outboxEvent : pendingEvents) {
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
             publish(outboxEvent);
         }
     }
 
     private void publish(OutboxEvent outboxEvent) {
         try {
+            log.info("Outbox publish attempt: eventId={}, topic={}, orderId={}",
+                    outboxEvent.getEventId(), outboxEvent.getTopicName(), outboxEvent.getOrderId());
             OrderCreatedEvent event = objectMapper.readValue(
                     outboxEvent.getPayload(),
                     OrderCreatedEvent.class
@@ -55,24 +68,31 @@ public class OutboxPublisher {
             com.aryan.kafka.avro.OrderCreatedEvent avroEvent =
                     toAvro(event);
             SendResult<String, com.aryan.kafka.avro.OrderCreatedEvent> result =
-                    orderEventProducer.publish(avroEvent).get();
+                    orderEventProducer.publish(avroEvent).get(publishTimeoutMs, TimeUnit.MILLISECONDS);
 
             outboxEvent.setStatus("PUBLISHED");
             outboxEvent.setPublishedAt(LocalDateTime.now());
             outboxEventRepository.save(outboxEvent);
 
             log.info(
-                    "Outbox event published: eventId={}, topic={}, partition={}, offset={}",
+                    "Outbox event published: eventId={}, orderId={}, topic={}, partition={}, offset={}",
                     outboxEvent.getEventId(),
-                    outboxEvent.getTopicName(),
+                    outboxEvent.getOrderId(),
+                    result.getRecordMetadata().topic(),
                     result.getRecordMetadata().partition(),
                     result.getRecordMetadata().offset()
             );
 
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            log.error("Outbox publish interrupted; row remains PENDING: eventId={}, topic={}, orderId={}",
+                    outboxEvent.getEventId(), outboxEvent.getTopicName(), outboxEvent.getOrderId(), exception);
         } catch (Exception exception) {
             log.error(
-                    "Outbox publish failed: eventId={}",
+                    "Outbox publish failed; row will be retried: eventId={}, topic={}, orderId={}",
                     outboxEvent.getEventId(),
+                    outboxEvent.getTopicName(),
+                    outboxEvent.getOrderId(),
                     exception
             );
         }
