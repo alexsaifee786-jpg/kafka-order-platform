@@ -53,7 +53,7 @@ This is an order-and-inventory backend demonstrating production-readiness patter
 
 - **Implemented:** source-controlled services, reliability mechanisms, infrastructure configuration, and Jenkins pipeline.
 - **Reported local verification:** order success/rejection, duplicate delivery, Retry/DLT, schema evolution, monitoring, and CI/CD exercises described in this guide.
-- **Committed runtime captures:** four monitoring screenshots and one Jenkins job overview; the remaining evidence checklist is explicitly pending.
+- **Committed runtime captures:** four monitoring screenshots, one Jenkins job overview, and two Docker Desktop container views; the remaining evidence checklist is explicitly pending.
 - **Current limitations:** committed database credentials need rotation/externalization; replay is a proof-of-concept; Grafana/Jenkins UI settings are not fully provisioned; deployment has no automatic rollback or zero-downtime guarantee.
 
 Source configuration and test inventory were reviewed for the final documentation pass against [repository revision fa1d0caf](https://github.com/alexsaifee786-jpg/kafka-order-platform/tree/fa1d0cafdaac60c2e0ed43259546dd0ee149b7cf). The review did not rerun the test suite, deployment, or fresh-machine setup. Kafka exactly-once semantics across MySQL and Kafka are not claimed.
@@ -2669,7 +2669,7 @@ These are future hardening opportunities, not features claimed as already covere
 
 This chapter indexes the runtime evidence stored in the repository and identifies the captures still needed for a complete project walkthrough.
 
-**Evidence inventory:** five PNG files are currently committed under [docs/screenshots](docs/screenshots/): four monitoring captures and one Jenkins job overview. Kafka, database, Docker Hub, and detailed Jenkins stage/source-revision captures remain pending.
+**Evidence inventory:** seven PNG files are currently committed under [docs/screenshots](docs/screenshots/): four monitoring captures, one Jenkins job overview, and two Docker Desktop container views. Kafka topic/quorum/lag output, database results, Docker Hub tags, detailed Jenkins stages/source revision, and Actuator health captures remain pending.
 
 A screenshot records one observation at one point in time. It does not establish current system health or replace the automated tests described in [Testing Strategy & Verification Evidence](#testing-strategy--verification-evidence).
 
@@ -2724,6 +2724,31 @@ An artifact is a build output retained by Jenkins for download. These are the se
 
 This screenshot records the job overview, not individual stage results, the checked-out Git SHA, Docker Hub publication, or Actuator responses. The detailed pipeline-success capture below remains pending. Browser tabs, address/bookmark bars, and the Windows taskbar were cropped out; the Jenkins content was not changed.
 
+### Docker Desktop Container Evidence
+
+#### Applications, Jenkins, and Kafka Brokers
+
+![Docker Desktop showing Jenkins, application containers, and three Kafka brokers](docs/screenshots/docker-containers-overview.png)
+
+The first view shows running indicators for Jenkins, the Inventory and Order application rows, and all three Kafka brokers. Visible application port mappings are `8082:8082` and `8080:8080`. The broker mappings are `9092:9092`, `9094:9092`, and `9096:9092`. Jenkins shows `50000:50000` and a link for additional ports; its HTTP port mapping is not expanded in this capture.
+
+#### Kafka and Schema Registry
+
+![Docker Desktop showing application containers, all three Kafka brokers, and Schema Registry](docs/screenshots/docker-kafka-schema-registry.png)
+
+The second view includes the three broker rows and the Schema Registry row with `8081:8081`. Some container names and image names are truncated by the UI columns, so these views do not establish full image tags or deployed build numbers.
+
+| Visible evidence | What it establishes |
+|---|---|
+| Running indicators and stop buttons | Containers are shown as running at capture time |
+| Published port mappings | Host/container ports displayed by Docker Desktop |
+| Expanded Compose group | The visible infrastructure containers are grouped under the project |
+| CPU and memory counters | A momentary resource-usage sample; not a benchmark or root-cause diagnosis |
+
+**Container running does not mean application ready.** These views do not prove Actuator health, Kafka quorum/ISR health, zero consumer lag, or a completed order transaction. Prometheus and Grafana are not visible in these captures; no claim about their runtime state is made from these images.
+
+Only the Windows taskbar was cropped out. Docker Desktop content, including resource values, was preserved.
+
 ### Remaining Runtime Evidence Checklist
 
 All filenames below are **proposed capture names, not existing files**. Add links only after the actual captures are committed.
@@ -2740,7 +2765,7 @@ All filenames below are **proposed capture names, not existing files**. Add link
 | Pending capture | `retry-dlt-evidence.png` | A technical processing failure, exhausted retries, and the matching record in `orders.created.avro-dlt` |
 | Pending capture | `jenkins-pipeline-success.png` | Build number, source revision, stages, and final successful result |
 | Pending capture | `dockerhub-versioned-images.png` | Both service repositories with the matching Jenkins build-number tags |
-| Pending capture | `deployed-services-health.png` | Running service containers/image tags and both Actuator health responses |
+| Partial evidence | `deployed-services-health.png` | Container-running views are committed above; full image tags and both Actuator health responses still need a capture |
 | Pending capture | `github-webhook-delivery.png` | Successful webhook delivery linked to the Jenkins-triggering event, with sensitive values removed |
 
 A missing screenshot is an evidence-packaging gap; it does not by itself mean the implementation is missing. Existing runtime descriptions remain documented observations until their associated captures or logs are committed.
