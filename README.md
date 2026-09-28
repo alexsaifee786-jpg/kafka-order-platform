@@ -56,7 +56,7 @@ This is an order-and-inventory backend demonstrating production-readiness patter
 - **Committed runtime captures:** four monitoring screenshots, one Jenkins job overview, and two Docker Desktop container views; the remaining evidence checklist is explicitly pending.
 - **Current limitations:** committed database credentials need rotation/externalization; replay is a proof-of-concept; Grafana/Jenkins UI settings are not fully provisioned; deployment has no automatic rollback or zero-downtime guarantee.
 
-Source configuration and test inventory were reviewed for the final documentation pass against [repository revision fa1d0caf](https://github.com/alexsaifee786-jpg/kafka-order-platform/tree/fa1d0cafdaac60c2e0ed43259546dd0ee149b7cf). The review did not rerun the test suite, deployment, or fresh-machine setup. Kafka exactly-once semantics across MySQL and Kafka are not claimed.
+Source configuration and test inventory were reviewed for the final documentation pass against [repository revision 20c13efc](https://github.com/alexsaifee786-jpg/kafka-order-platform/tree/20c13efc70fa925270467552aa91ee509e54f287). The review did not rerun the test suite, deployment, or fresh-machine setup. Kafka exactly-once semantics across MySQL and Kafka are not claimed.
 
 ### Tech Stack
 
@@ -580,6 +580,8 @@ manual ACK
 
 This keeps DLT inspection separate from the normal `inventory-service-group` business consumer.
 
+The inspection listener also acknowledges after logging an Avro decoding error. Its committed offset therefore means the record was inspected or the decode failure was logged, not that business recovery succeeded. Malformed non-Avro bytes may not be decoded by this inspector; the current DLT integration test covers a valid Avro record whose business processing fails.
+
 ### Replay Support — Current Repository Boundary
 
 The repository contains `InventoryDltReplayRunner`, enabled only when:
@@ -597,10 +599,10 @@ app.dlt.replay.enabled=false
 The current runner is a **controlled proof-of-concept replay utility**, not a general production replay engine. In the committed code it:
 
 - assigns directly to DLT partition `1`;
-- scans from the beginning for up to 30 seconds;
+- polls from the beginning using a 30-second scan deadline (deserialization and send waits can extend total runtime);
 - matches one hard-coded `orderId` and `eventId`;
 - republishes only that matching Avro event to `orders.created.avro`;
-- exits after the replay succeeds.
+- returns from the replay runner after a successful send; it does not shut down the Spring Boot application.
 
 A production-grade replay process would remove those hard-coded identifiers and add operator-controlled selection, auditability, authorization, replay limits, and explicit duplicate/replay policies.
 
@@ -1053,7 +1055,7 @@ up = 1  → target scrape succeeded
 up = 0  → target scrape failed
 ```
 
-The local Grafana alerting demo used this availability signal to observe the Inventory Service going down and later recovering.
+The reported local Grafana exercise used this availability signal for service-down alerting. The following is the intended lifecycle; the committed images show separate rule states rather than a correlated history of the same alert instance.
 
 ```text
 Inventory Service healthy
@@ -1070,16 +1072,12 @@ service returns
         ↓
 Prometheus up = 1
         ↓
-Grafana alert → RESOLVED
+Grafana alert → NORMAL
 ```
 
 ### Dashboard Coverage
 
-The committed runtime evidence shows a Grafana dashboard used to visualize:
-
-- Inventory Service availability;
-- CPU/runtime activity;
-- JVM heap-memory usage.
+The committed `grafana-monitoring-dashboard.png` shows the Grafana **Dashboards folder listing**, including `Kafka Order Platform Monitoring`. It does not show dashboard panels, CPU graphs, or JVM heap graphs, so panel coverage cannot be established from that image.
 
 The Grafana container uses the named volume:
 
@@ -1093,12 +1091,12 @@ so UI-created dashboards, data-source configuration, and alert state/configurati
 
 ### Alerting and Email Notification Boundary
 
-The repository contains screenshot evidence for both alert states:
+The repository contains separate screenshots of Firing and Normal alert-rule states:
 
 - `docs/screenshots/grafana-alert-firing.png`
 - `docs/screenshots/grafana-alert-resolved.png`
 
-Email notification was also exercised during the local monitoring work, using SMTP credentials kept outside Git.
+Email notification was reported as exercised during the local monitoring work. The committed alert screenshots show an email contact-point label, but do not prove delivery. Real SMTP credentials must remain outside Git.
 
 However, the **current committed Docker Compose configuration intentionally has SMTP disabled by default**:
 
@@ -1110,7 +1108,7 @@ Therefore:
 
 ```text
 Grafana alert evaluation      → requires the locally configured rule
-FIRING / RESOLVED state       → demonstrated
+Firing / Normal rule states   → visible in separate committed captures
 SMTP email delivery           → opt-in, not enabled by default in committed Compose
 ```
 
@@ -2680,9 +2678,9 @@ The existing monitoring chapter describes these captures. The links below point 
 | Capture | Repository file | Evidence scope |
 |---|---|---|
 | Prometheus target | [prometheus-target-up.png](docs/screenshots/prometheus-target-up.png) | Target reachability during the captured scrape |
-| Grafana dashboard | [grafana-monitoring-dashboard.png](docs/screenshots/grafana-monitoring-dashboard.png) | Monitoring panels during the selected time range |
+| Grafana monitoring folder | [grafana-monitoring-dashboard.png](docs/screenshots/grafana-monitoring-dashboard.png) | Dashboards folder listing; panel contents are not visible |
 | Alert firing | [grafana-alert-firing.png](docs/screenshots/grafana-alert-firing.png) | Recorded service-down alert state |
-| Alert resolved | [grafana-alert-resolved.png](docs/screenshots/grafana-alert-resolved.png) | Recorded recovery / resolved state |
+| Alert Normal state | [grafana-alert-resolved.png](docs/screenshots/grafana-alert-resolved.png) | Rule displays Normal; historical filename retained |
 
 <details>
 <summary>View the committed monitoring screenshots</summary>
@@ -2691,21 +2689,21 @@ The existing monitoring chapter describes these captures. The links below point 
 
 ![Prometheus target capture](docs/screenshots/prometheus-target-up.png)
 
-#### Grafana Dashboard
+#### Grafana Monitoring Folder
 
-![Grafana monitoring dashboard capture](docs/screenshots/grafana-monitoring-dashboard.png)
+![Grafana Dashboards folder listing](docs/screenshots/grafana-monitoring-dashboard.png)
 
 #### Alert Firing
 
 ![Grafana alert firing capture](docs/screenshots/grafana-alert-firing.png)
 
-#### Alert Resolved
+#### Alert Normal State
 
-![Grafana alert resolved capture](docs/screenshots/grafana-alert-resolved.png)
+![Grafana alert rule showing Normal](docs/screenshots/grafana-alert-resolved.png)
 
 </details>
 
-These captures document the monitoring exercise. They do not establish that SMTP notifications are currently enabled; the committed Compose configuration disables SMTP by default.
+These captures document separate observations from the monitoring exercise. The firing image shows **Firing** and the file named `grafana-alert-resolved.png` shows **Normal**. Their visible rule identifiers differ, so the pair alone does not prove one alert instance transitioned from firing to recovery. A correlated history capture would be needed for that evidence. The email contact-point label shows routing configuration, not successful email delivery. SMTP is disabled by default in committed Compose.
 
 ### Jenkins Build History and Archived Artifacts
 
@@ -2755,6 +2753,8 @@ All filenames below are **proposed capture names, not existing files**. Add link
 
 | Status | Suggested filename | What the capture should show |
 |---|---|---|
+| Pending capture | `grafana-dashboard-panels.png` | Actual monitoring panels with selected time range and queries visible |
+| Pending capture | `grafana-alert-history.png` | The same rule/instance and timestamps linking firing to recovery |
 | Pending capture | `kafka-cluster-topics.png` | Broker/topic output for the actual Avro flow, including partitions, replicas, and ISR |
 | Pending capture | `kafka-consumer-lag.png` | Consumer group, topic partitions, committed offsets, log-end offsets, and lag after the sample run |
 | Pending capture | `order-api-response.png` | Request and response for one sample order, with its order ID visible |
@@ -2814,7 +2814,7 @@ Save captures under `docs/screenshots/` using descriptive filenames. Include a s
 
 Capture only the relevant output. Remove credentials, authorization headers, tokens, personal email addresses, and unrelated records before committing. Preserve the identifiers needed to correlate the sample run. Retain useful log excerpts as text when screenshots would make the evidence difficult to read.
 
-The current repository therefore has a committed monitoring gallery and an explicit capture checklist for the remaining runtime evidence.
+The repository has seven committed monitoring, Jenkins, and Docker captures, with an explicit checklist for the remaining runtime evidence.
 
 ## How to Run / Local Setup
 
@@ -2859,14 +2859,14 @@ git status
 
 Use the existing checkout without recloning or resetting local work. Review any uncommitted changes before updating it.
 
-On a **fresh machine only**, from an existing parent folder such as `D:`:
+On a **fresh machine only**, from an existing parent folder such as `D:\`:
 
 ```powershell
 git clone --branch main https://github.com/alexsaifee786-jpg/kafka-order-platform.git
 Set-Location .\kafka-order-platform
 ```
 
-The remaining examples assume `D:kafka-order-platform`; adjust that path if the checkout is elsewhere. There is no root Maven build: run each wrapper inside its service directory.
+The remaining examples assume `D:\kafka-order-platform`; adjust that path if the checkout is elsewhere. There is no root Maven build: run each wrapper inside its service directory.
 
 ### 2. Prepare MySQL Databases and Local Credentials
 
@@ -3138,7 +3138,7 @@ Configure the GitHub push webhook to the issued HTTPS forwarding address with `/
 
 | Symptom | Check first |
 |---|---|
-| `.mvnw.cmd` is not recognized | Run from `order-service` or `inventory-service`, not the repository root |
+| `.\mvnw.cmd` is not recognized | Run from `order-service` or `inventory-service`, not the repository root |
 | MySQL access denied / unknown database | Host MySQL, database creation, grants, and credential overrides in the actual launch terminal |
 | Schema Registry connection refused | Broker health, Registry logs, host port 8081, and the address appropriate to host vs container execution |
 | Order remains pending | Correlate both outbox rows, source/result topics, application logs, and Registry connectivity |

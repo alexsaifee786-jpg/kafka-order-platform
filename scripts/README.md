@@ -1,39 +1,28 @@
-# Local Kafka failure testing
+# Legacy Kafka failure-testing helpers
 
-Run these commands from the repository root in PowerShell. Docker Desktop, the
-three Kafka containers, `order-service`, and `inventory-service` must be running.
+These helpers belong to the earlier JSON / `orders.created-dlt` phase. They are retained for historical reference and are **not the current Avro verification workflow**.
 
-## Send an order that intentionally fails inventory processing
+Use the root [How to Run / Local Setup](../README.md#how-to-run--local-setup) and [Retry, Error Handling, DLT & Replay](../README.md#retry-error-handling-dlt--replay) sections for the current implementation.
 
-```powershell
-scripts\test-failed-order 2030
-```
+## Compatibility gaps
 
-`productId` defaults to `999`, which triggers the intentional failure in
-`InventoryEventConsumer`. The consumer makes one initial attempt and two retries
-before publishing the record to `orders.created-dlt`.
+| Helper | Legacy assumption | Current implementation |
+|---|---|---|
+| `test-failed-order.ps1` | Caller supplies `orderId`; product 999 always triggers an intentional listener failure | The API generates the order ID and returns it in HTTP 202 text. Missing inventory causes failure; product 999 is not a special listener switch. |
+| `read-dlt.ps1` | Reads `orders.created-dlt` as console text and filters JSON by order ID | Current source is `orders.created.avro`; DLT is `orders.created.avro-dlt`, with Avro payloads for valid business-failure records. |
+| `dlt-offsets.ps1` | Queries offsets for `orders.created-dlt` | Current DLT offsets must be queried for `orders.created.avro-dlt`. |
 
-## Read one order from the DLT
+The old script's “about five seconds” message is not an end-to-end guarantee: publication, serialization, scheduling, processing, and recovery add time.
 
-Wait about five seconds for retries to finish, then run:
+The `.cmd` wrappers still launch these legacy PowerShell scripts. Updating this documentation does not migrate the helpers.
 
-```powershell
-scripts\read-dlt 2030
-```
+## Current failure-verification approach
 
-Omit `-OrderId` to display all DLT records:
+1. In a local test environment, choose a positive product ID that has no inventory row.
+2. Submit the current API request with `productId`, `quantity`, and `amount`, and retain the returned generated order ID.
+3. Inspect application logs for the retryable failure and DLT recovery.
+4. Inspect the Avro DLT through the current Java inspection consumer and Schema Registry.
 
-```powershell
-scripts\read-dlt
-```
+An existing product with insufficient stock produces an inventory rejection result; it is not the same technical-failure scenario.
 
-## Show DLT end offsets
-
-```powershell
-scripts\dlt-offsets
-```
-
-For a newly failed record, one partition's end offset increases by one.
-
-The `.cmd` launchers use the repository's PowerShell scripts without requiring a
-machine-wide PowerShell execution-policy change.
+The Java replay runner remains disabled by default and contains hard-coded record selection. Treat it as a controlled proof-of-concept; do not enable it for a routine setup check.
