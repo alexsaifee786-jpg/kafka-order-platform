@@ -53,7 +53,7 @@ This is an order-and-inventory backend demonstrating production-readiness patter
 
 - **Implemented:** source-controlled services, reliability mechanisms, infrastructure configuration, and Jenkins pipeline.
 - **Reported local verification:** order success/rejection, duplicate delivery, Retry/DLT, schema evolution, monitoring, and CI/CD exercises described in this guide.
-- **Committed runtime captures:** four monitoring screenshots; the remaining evidence checklist is explicitly pending.
+- **Committed runtime captures:** four monitoring screenshots and one Jenkins job overview; the remaining evidence checklist is explicitly pending.
 - **Current limitations:** committed database credentials need rotation/externalization; replay is a proof-of-concept; Grafana/Jenkins UI settings are not fully provisioned; deployment has no automatic rollback or zero-downtime guarantee.
 
 Source configuration and test inventory were reviewed for the final documentation pass against [repository revision fa1d0caf](https://github.com/alexsaifee786-jpg/kafka-order-platform/tree/fa1d0cafdaac60c2e0ed43259546dd0ee149b7cf). The review did not rerun the test suite, deployment, or fresh-machine setup. Kafka exactly-once semantics across MySQL and Kafka are not claimed.
@@ -2669,7 +2669,7 @@ These are future hardening opportunities, not features claimed as already covere
 
 This chapter indexes the runtime evidence stored in the repository and identifies the captures still needed for a complete project walkthrough.
 
-**Evidence inventory:** four PNG files are currently committed under [docs/screenshots](docs/screenshots/). They cover monitoring. Kafka, database, Jenkins, and Docker Hub screenshots are not yet committed in that folder.
+**Evidence inventory:** five PNG files are currently committed under [docs/screenshots](docs/screenshots/): four monitoring captures and one Jenkins job overview. Kafka, database, Docker Hub, and detailed Jenkins stage/source-revision captures remain pending.
 
 A screenshot records one observation at one point in time. It does not establish current system health or replace the automated tests described in [Testing Strategy & Verification Evidence](#testing-strategy--verification-evidence).
 
@@ -2706,6 +2706,23 @@ The existing monitoring chapter describes these captures. The links below point 
 </details>
 
 These captures document the monitoring exercise. They do not establish that SMTP notifications are currently enabled; the committed Compose configuration disables SMTP by default.
+
+### Jenkins Build History and Archived Artifacts
+
+![Jenkins job overview showing archived service JARs and build history](docs/screenshots/jenkins-build-history-artifacts.png)
+
+The cropped capture shows the local `kafka-order-platform-pipeline` job overview:
+
+| Visible item | Meaning at capture time |
+|---|---|
+| Last Successful Artifacts | Archived `inventory-service-0.0.1-SNAPSHOT.jar` and `order-service-0.0.1-SNAPSHOT.jar` |
+| Last stable / successful build: #28 | Jenkins identifies build #28 as the last stable and successful run |
+| Last failed build: #29 | Jenkins identifies build #29 as the last failed run |
+| Last build / unsuccessful / completed: #30 | Build #30 completed without success; this overview does not show its exact result or cause |
+
+An artifact is a build output retained by Jenkins for download. These are the service JAR files, not Docker images. Permalinks point to builds by role (for example, last successful build) and can change as new builds complete.
+
+This screenshot records the job overview, not individual stage results, the checked-out Git SHA, Docker Hub publication, or Actuator responses. The detailed pipeline-success capture below remains pending. Browser tabs, address/bookmark bars, and the Windows taskbar were cropped out; the Jenkins content was not changed.
 
 ### Remaining Runtime Evidence Checklist
 
