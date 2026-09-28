@@ -75,6 +75,7 @@ public class OrderApplicationService {
         );
     }
     }
+    @Transactional
     public boolean markInventoryReserved(InventoryReservedEvent event, ConsumerRecord<String,InventoryReservedEvent> record)
     {
         boolean alreadyProcessed = processedEventRepository.existsByEventId(event.getEventId());
