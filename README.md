@@ -2706,6 +2706,281 @@ Jenkinsfile
 
 This separation is useful during troubleshooting because a successful Git push, successful webhook delivery, successful Jenkins trigger, and successful pipeline execution are four different checkpoints.
 
+## Secrets, Credentials & Configuration Management
+
+The project uses a mix of source-controlled configuration, runtime environment overrides, Jenkins Credentials, and local-only secret files. These should be treated differently.
+
+### Configuration Layers
+
+```mermaid
+flowchart TD
+    Repo[Source-controlled config]
+    Env[Runtime environment variables]
+    JenkinsCreds[Jenkins Credentials Store]
+    LocalEnv[Local .env / local override files]
+    App[Spring Boot / Docker / Jenkins runtime]
+
+    Repo --> App
+    Env --> App
+    JenkinsCreds --> App
+    LocalEnv --> App
+```
+
+The intended rule is:
+
+```text
+non-sensitive defaults
+    → repository
+
+environment-specific addresses
+    → environment variables
+
+real secrets
+    → Jenkins Credentials / local secret store
+    → never hard-code in Git
+```
+
+### Source-Controlled Non-Secret Configuration
+
+The repository safely keeps configuration such as:
+
+- Kafka topic names;
+- service ports;
+- Kafka listener addresses for local development;
+- Schema Registry URLs for local development;
+- retry/backoff values;
+- Actuator endpoint exposure;
+- Docker image names;
+- health-check timings.
+
+These values describe how the application behaves but are not authentication secrets.
+
+### Runtime Environment Overrides
+
+The Jenkins deployment overrides environment-dependent values when the applications move from Windows-host execution to Docker.
+
+Examples include:
+
+```text
+SPRING_DATASOURCE_URL
+SPRING_KAFKA_BOOTSTRAP_SERVERS
+SPRING_KAFKA_PRODUCER_PROPERTIES_SCHEMA_REGISTRY_URL
+SPRING_KAFKA_CONSUMER_PROPERTIES_SCHEMA_REGISTRY_URL
+```
+
+This is why the same Spring Boot binaries can use:
+
+```text
+localhost
+```
+
+during direct local development and:
+
+```text
+host.docker.internal
+kop-kafka-1
+kop-kafka-2
+kop-kafka-3
+kop-schema-registry
+```
+
+when running inside Docker.
+
+### Docker Hub Credential
+
+The Docker Hub token is not stored in the Jenkinsfile.
+
+The pipeline references only:
+
+```text
+credentialsId = dockerhub-credentials
+```
+
+Jenkins temporarily binds that credential as:
+
+```text
+DOCKERHUB_USERNAME
+DOCKERHUB_TOKEN
+```
+
+inside the login stage.
+
+```text
+Jenkinsfile
+    ↓ credential ID only
+Jenkins Credentials Store
+    ↓ actual secret
+withCredentials(...)
+    ↓ temporary runtime variables
+docker login --password-stdin
+```
+
+This is the preferred pattern already implemented for Docker Hub authentication.
+
+### Grafana SMTP Credentials
+
+The repository contains only safe SMTP placeholders in:
+
+```text
+.env.example
+```
+
+while the real local file:
+
+```text
+.env
+```
+
+is ignored by Git.
+
+The current Compose configuration also keeps:
+
+```text
+GF_SMTP_ENABLED=false
+```
+
+so SMTP credentials are not required for the normal committed runtime.
+
+If email notification is enabled again locally, the real Gmail App Password must stay outside Git.
+
+### ngrok Token
+
+The ngrok authentication token is runtime tooling configuration, not application configuration.
+
+It is intentionally absent from the repository and should never appear in:
+
+- README examples;
+- committed shell commands;
+- screenshots;
+- Jenkinsfile;
+- `.env.example`.
+
+A token exposed in a terminal screenshot or shared log should be revoked and replaced.
+
+### Current Database Credential Gap
+
+During this documentation/security review, the current repository was found to contain database passwords directly in Spring property files.
+
+Affected configuration areas include:
+
+```text
+order-service application.properties
+inventory-service application.properties
+inventory-service test application properties
+```
+
+The actual values are intentionally **not reproduced in this documentation**.
+
+This is a current repository security gap. The deployment also does not override the database password in Jenkins, so the application currently depends on the committed property value.
+
+The production-readiness target should instead be:
+
+```text
+application.properties
+    ↓
+no real password
+
+local development
+    ↓
+local environment / ignored override
+
+Jenkins
+    ↓
+Jenkins Credentials Store
+
+application container
+    ↓
+SPRING_DATASOURCE_PASSWORD
+```
+
+> **Important:** because a database credential has already existed in Git history, simply deleting it from the latest file is not enough. The credential should be treated as exposed and rotated before the repository is used beyond the local learning environment.
+
+### Why This Gap Was Not Silently Rewired
+
+The current Jenkins pipeline has a configured Docker Hub credential, but the repository does not prove that a corresponding MySQL credential entry already exists in Jenkins.
+
+Changing the Spring configuration to require a new credential ID without first creating that Jenkins credential would break the current test/deployment workflow.
+
+Therefore this documentation records the gap accurately instead of pretending it is already solved.
+
+A safe migration would be:
+
+```text
+1. create/rotate MySQL credential
+2. store it in Jenkins Credentials
+3. externalize Spring datasource password
+4. pass password to test/deploy stages
+5. use ignored local override for developer machine
+6. verify CI and runtime
+7. remove old secret from active config
+```
+
+### Git Ignore Protection
+
+The repository already ignores:
+
+```text
+.env
+```
+
+and now also ignores local Spring override files:
+
+```text
+**/src/main/resources/application-local.properties
+**/src/test/resources/application-local.properties
+```
+
+These files can be used for machine-specific configuration without accidentally adding them through a normal `git add .`.
+
+This protection helps prevent future accidental commits, but it does not erase credentials that were committed previously.
+
+### Secret Classification
+
+| Item | Current handling | Status |
+|---|---|---|
+| Docker Hub token | Jenkins Credentials | good |
+| Docker Hub credential ID | source-controlled Jenkinsfile | safe identifier |
+| Grafana SMTP password | local placeholder/template; SMTP disabled by default | acceptable for current setup |
+| ngrok auth token | outside repository | correct |
+| Kafka broker addresses | source-controlled / runtime override | non-secret |
+| Schema Registry URL | source-controlled / runtime override | non-secret |
+| MySQL password | currently committed in properties | **needs externalization + rotation** |
+| `.env` | ignored by Git | correct |
+
+### Screenshots and Logs
+
+Before committing screenshots or sharing terminal output, verify that the image does not expose:
+
+- passwords;
+- personal access tokens;
+- Docker Hub tokens;
+- ngrok tokens;
+- SMTP App Passwords;
+- Jenkins credential values.
+
+Showing a Jenkins **credential ID** is acceptable; showing the stored credential value is not.
+
+### Configuration Management Summary
+
+```text
+Repository
+    → code + safe defaults + credential IDs
+
+Environment variables
+    → environment-specific addresses/settings
+
+Jenkins Credentials
+    → CI/CD secrets
+
+Ignored local files
+    → developer-machine secrets
+
+Never Git
+    → real passwords / tokens
+```
+
+This chapter documents both the implemented secure patterns and the remaining database-password gap so the repository does not overstate its current security posture.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
