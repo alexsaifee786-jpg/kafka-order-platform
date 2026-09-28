@@ -54,13 +54,15 @@ The goal of this project is not only to demonstrate a working Kafka producer-con
 
 ```text
 kafka-order-platform/
-├── order-service/        # Produces order events
-├── inventory-service/    # Consumes events and updates inventory
+├── order-service/        # Order API, outbox publisher and result consumers
+├── inventory-service/    # Inventory processing, idempotency, retry/DLT and result outbox
 ├── monitoring/           # Prometheus configuration
-├── scripts/              # DLT and failure-testing scripts
+├── scripts/              # Local failure/DLT helper scripts
 ├── docs/screenshots/     # Runtime proof screenshots
+├── jenkins-docker/       # Custom Jenkins image with Docker CLI
+├── Jenkinsfile           # CI/CD pipeline
 ├── docker-compose.yml    # Kafka, Schema Registry, Prometheus and Grafana
-├── .env.example          # Environment variable template
+├── .env.example          # Safe optional environment-variable template
 └── README.md
 ```
 
@@ -1445,6 +1447,284 @@ Observability             → Prometheus + Grafana
 ```
 
 These mechanisms solve different failure windows; none of them is presented as a single "exactly-once for everything" guarantee.
+
+## Docker Architecture, Containers, Volumes & Networking
+
+Docker is used in two different ways in this project:
+
+1. **Docker Compose** runs the shared infrastructure: Kafka, Schema Registry, Prometheus, and Grafana.
+2. **Jenkins** builds and later runs the two Spring Boot application containers on the same Docker network.
+
+MySQL is **not** containerized in the committed Compose file; both services connect to the host machine's MySQL instance.
+
+### Container Topology
+
+```mermaid
+flowchart TB
+    Host[Windows Host]
+
+    subgraph DockerNetwork[kafka-order-platform_default]
+        K1[kop-kafka-1\nKafka + KRaft Controller]
+        K2[kop-kafka-2\nKafka + KRaft Controller]
+        K3[kop-kafka-3\nKafka + KRaft Controller]
+        SR[kop-schema-registry]
+        P[kop-prometheus]
+        G[kop-grafana]
+        O[order-service-container]
+        I[inventory-service-container]
+
+        K1 <--> K2
+        K2 <--> K3
+        K3 <--> K1
+
+        SR --> K1
+        SR --> K2
+        SR --> K3
+
+        O --> K1
+        O --> K2
+        O --> K3
+        O --> SR
+
+        I --> K1
+        I --> K2
+        I --> K3
+        I --> SR
+    end
+
+    O -->|host.docker.internal| MySQL[(MySQL on Windows Host)]
+    I -->|host.docker.internal| MySQL
+    P -->|host.docker.internal:8082| I
+
+    Host -->|8080| O
+    Host -->|8082| I
+    Host -->|8081| SR
+    Host -->|9090| P
+    Host -->|3000| G
+```
+
+### Compose Infrastructure
+
+The committed `docker-compose.yml` defines these infrastructure containers:
+
+| Container | Image | Host port | Main purpose |
+|---|---|---:|---|
+| `kop-kafka-1` | `apache/kafka:4.3.1` | `9092` | Kafka broker + KRaft controller |
+| `kop-kafka-2` | `apache/kafka:4.3.1` | `9094` | Kafka broker + KRaft controller |
+| `kop-kafka-3` | `apache/kafka:4.3.1` | `9096` | Kafka broker + KRaft controller |
+| `kop-schema-registry` | `confluentinc/cp-schema-registry:8.2.3` | `8081` | Avro schema storage/runtime lookup |
+| `kop-prometheus` | `prom/prometheus:latest` | `9090` | metrics collection |
+| `kop-grafana` | `grafana/grafana:latest` | `3000` | dashboards and alerting |
+
+The Spring Boot services are intentionally **not** defined as Compose services in the current repository. Jenkins deploys them separately with `docker run`.
+
+### Application Images
+
+Both application Dockerfiles are intentionally small:
+
+```dockerfile
+FROM eclipse-temurin:17-jre
+
+WORKDIR /app
+COPY target/*.jar app.jar
+
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+This means the image build expects Maven packaging to have already produced the JAR.
+
+```text
+Maven package
+    ↓
+target/*.jar
+    ↓
+docker build
+    ↓
+Java 17 JRE image
+    ↓
+java -jar app.jar
+```
+
+The Dockerfiles use a JRE rather than a full JDK because compilation and testing happen before image creation.
+
+> **Build boundary:** these are single-stage runtime Dockerfiles. Maven compilation does not happen inside the Docker image build.
+
+### Docker Network
+
+Running Compose creates the default project network:
+
+```text
+kafka-order-platform_default
+```
+
+Jenkins explicitly attaches both application containers to this network:
+
+```text
+--network kafka-order-platform_default
+```
+
+That gives the applications Docker DNS access to infrastructure container names such as:
+
+```text
+kop-kafka-1
+kop-kafka-2
+kop-kafka-3
+kop-schema-registry
+```
+
+So deployed application containers use:
+
+```text
+Kafka:
+kop-kafka-1:19092
+kop-kafka-2:19092
+kop-kafka-3:19092
+
+Schema Registry:
+http://kop-schema-registry:8081
+```
+
+instead of host-only `localhost` addresses.
+
+### Host Access vs Container Access
+
+The project deliberately separates the two networking paths:
+
+| Dependency | App running directly on Windows | App running in Docker |
+|---|---|---|
+| Kafka | `localhost:9092,9094,9096` | `kop-kafka-1/2/3:19092` |
+| Schema Registry | `http://localhost:8081` | `http://kop-schema-registry:8081` |
+| MySQL | `localhost:3306` | `host.docker.internal:3306` |
+
+This is why the Jenkins deployment overrides Spring configuration using environment variables instead of using the localhost values committed for direct local execution.
+
+### Application Port Mapping
+
+Jenkins runs the application containers with:
+
+```text
+order-service-container
+8080:8080
+
+inventory-service-container
+8082:8082
+```
+
+These mappings make the services reachable from the Windows host and from Jenkins health checks.
+
+### Persistent Docker Volumes
+
+Kafka and Grafana use named Docker volumes:
+
+```text
+kop-kafka-1-data
+kop-kafka-2-data
+kop-kafka-3-data
+grafana-data
+```
+
+Mappings:
+
+```text
+kop-kafka-1-data → /var/lib/kafka/data
+kop-kafka-2-data → /var/lib/kafka/data
+kop-kafka-3-data → /var/lib/kafka/data
+grafana-data     → /var/lib/grafana
+```
+
+These volumes allow broker data and Grafana's local state to survive ordinary container recreation as long as the named volumes themselves are retained.
+
+Prometheus uses a different pattern: its configuration is bind-mounted read-only from the repository:
+
+```text
+./monitoring/prometheus.yml
+        ↓
+/etc/prometheus/prometheus.yml:ro
+```
+
+> **Persistence boundary:** the committed Compose file does not define a persistent Prometheus data volume, so the repository should not claim Prometheus time-series retention across container recreation.
+
+### Kafka Container Health Checks
+
+Each Kafka broker has a Docker health check that runs:
+
+```text
+kafka-broker-api-versions.sh --bootstrap-server localhost:19092
+```
+
+with:
+
+- 30-second startup grace period;
+- 10-second interval;
+- 10-second timeout;
+- up to 12 retries.
+
+Schema Registry declares `depends_on` with `condition: service_healthy` for all three brokers.
+
+```text
+Kafka 1 healthy
+      +
+Kafka 2 healthy
+      +
+Kafka 3 healthy
+      ↓
+Schema Registry can start
+```
+
+This dependency ordering reflects the recovery lessons from the local Kafka/Schema Registry startup issues.
+
+### Local Resource Limits in the Compose Setup
+
+The committed infrastructure gives each Kafka broker:
+
+```text
+-Xms256m -Xmx256m
+```
+
+Schema Registry uses:
+
+```text
+-Xms256m -Xmx512m
+```
+
+These values were chosen for the local development environment; they are not presented as production sizing guidance.
+
+### Jenkins Docker Image
+
+The repository also contains `jenkins-docker/Dockerfile`:
+
+```text
+jenkins/jenkins:lts-jdk21
+        +
+docker.io CLI
+```
+
+The image switches to `root` only while installing the Docker CLI and then returns to the `jenkins` user.
+
+This lets the Jenkins runtime execute Docker commands used by the pipeline.
+
+> **Repository boundary:** the Dockerfile defines the Jenkins image, but the command/runtime configuration that launches the Jenkins container and grants it access to the Docker daemon is not source-controlled in this repository.
+
+### Docker Responsibility Boundary
+
+```text
+Docker Compose
+    → Kafka
+    → Schema Registry
+    → Prometheus
+    → Grafana
+
+Jenkins
+    → build application JARs
+    → build application images
+    → run application containers
+
+Windows host
+    → MySQL databases
+    → Docker Desktop engine
+```
+
+This separation is important when debugging: an infrastructure container being healthy does not automatically mean the application container is ready, and an application container being started does not guarantee its dependencies or business endpoints are healthy.
 
 ## Key Interview Concepts
 
