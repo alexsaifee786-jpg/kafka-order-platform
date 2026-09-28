@@ -2947,4 +2947,282 @@ This protection helps prevent future accidental commits, but it does not erase c
 | MySQL password | currently committed in properties | **needs externalization + rotation** |
 | `.env` | ignored by Git | correct |
 
-#
+## Testing Strategy & Verification Evidence
+
+The repository combines focused unit tests, Spring Boot context tests, a MySQL integration test, an embedded-Kafka DLT test, Jenkins test gates, and manual end-to-end verification.
+
+The goal is to test the failure boundaries that matter most in this event-driven design rather than relying only on application-startup checks.
+
+### Test Coverage Overview
+
+```mermaid
+flowchart TD
+    Unit[Focused Unit Tests]
+    Spring[Spring Context Tests]
+    DB[MySQL Integration Test]
+    Kafka[Embedded Kafka + DLT Integration]
+    CI[Jenkins Test Stages]
+    E2E[Manual End-to-End Verification]
+
+    Unit --> CI
+    Spring --> CI
+    DB --> CI
+    Kafka --> CI
+    CI --> E2E
+```
+
+The current repository contains **13 JUnit test methods** across the two services.
+
+| Test class | Type | Main behavior verified |
+|---|---|---|
+| `OrderServiceApplicationTests` | Spring context | Order Service application context loads |
+| `OutboxPublisherTest` | focused unit test | Order outbox publish, timeout, failure, and interruption behavior |
+| `InventoryServiceApplicationTests` | Spring context | Inventory Service application context loads with test profile |
+| `InventoryProcessingServiceTest` | focused unit test | idempotency, stock update, insufficient-stock result |
+| `InventoryDatabaseIntegrationTest` | MySQL integration | stock and processed-event persistence |
+| `InventoryRetryToDltIntegrationTests` | Kafka integration | failed Avro event reaches DLT with failure metadata |
+
+### Order Outbox Reliability Tests
+
+`OutboxPublisherTest` contains six focused tests.
+
+| Test | Verified behavior |
+|---|---|
+| `savesPublishedOnlyAfterAcknowledgment()` | row becomes `PUBLISHED` only after successful Kafka result |
+| `timeoutLeavesPendingAndLaterSchedulerRunRetries()` | stalled send leaves row `PENDING`; later scheduler run can retry |
+| `asynchronousFailureLeavesPending()` | broker/send failure leaves row retryable |
+| `synchronousSerializationFailureLeavesPending()` | serialization/Registry failure does not lose the outbox event |
+| `interruptionIsPreservedAndStopsBatch()` | interrupt flag is preserved and current batch stops |
+| `emptyPollDoesNotSendOrSave()` | empty poll performs no send/save work |
+
+The main invariant under test is:
+
+```text
+Kafka send succeeds
+        ↓
+mark PUBLISHED
+
+Kafka send uncertain / failed
+        ↓
+keep PENDING
+```
+
+### Inventory Business-Logic Unit Tests
+
+`InventoryProcessingServiceTest` isolates the business service with mocked repositories and verifies three important branches.
+
+**Duplicate event**
+
+```text
+eventId already processed
+    ↓
+process() returns false
+    ↓
+inventory repository is not touched
+    ↓
+no second business effect
+```
+
+**New event with sufficient stock**
+
+The test starts with stock `10`, processes quantity `2`, and verifies stock becomes `8` and the source event is recorded.
+
+**Insufficient stock**
+
+The test starts with stock `5` and requests quantity `10`. It verifies:
+
+- stock remains unchanged;
+- the source event is recorded;
+- a `PENDING` outbox row is created;
+- topic is `inventory.reservation.failed`;
+- event type is `INVENTORY_RESERVATION_FAILED`;
+- payload contains correlation fields;
+- reason is `Insufficient stock`.
+
+### MySQL Integration Test
+
+`InventoryDatabaseIntegrationTest` runs with the Spring context and a real MySQL test database.
+
+It:
+
+1. clears the relevant repositories;
+2. inserts inventory with stock `10`;
+3. processes quantity `2`;
+4. reads the database state back;
+5. verifies saved stock is `8`;
+6. verifies the source `eventId` exists in `processed_events`.
+
+The test configuration uses:
+
+```text
+inventory_test_db
+```
+
+with Hibernate `create-drop`.
+
+> **Current boundary:** this test requires a reachable MySQL instance; the repository does not currently use Testcontainers or an embedded relational database for it.
+
+### Retry-to-DLT Integration Test
+
+`InventoryRetryToDltIntegrationTests` uses `@EmbeddedKafka` with three partitions and creates:
+
+```text
+orders.created.avro
+orders.created.avro-dlt
+```
+
+It publishes an Avro event for a deliberately missing inventory product.
+
+```text
+OrderCreatedEvent
+    ↓
+Inventory processing throws
+    ↓
+initial attempt + 2 retries
+    ↓
+DeadLetterPublishingRecoverer
+    ↓
+orders.created.avro-dlt
+```
+
+The test verifies:
+
+- Kafka key is preserved;
+- `orderId` is preserved;
+- failing `productId` is preserved;
+- exception-cause header exists;
+- exception-message header exists;
+- original-topic header is `orders.created.avro`;
+- DLT value can still be decoded as `OrderCreatedEvent`.
+
+### Embedded Kafka vs Schema Registry
+
+Kafka is embedded inside the DLT integration test, but Avro still uses Schema Registry.
+
+Jenkins supplies:
+
+```text
+TEST_SCHEMA_REGISTRY_URL=http://host.docker.internal:8081
+```
+
+So the dependency model is:
+
+```text
+Kafka broker       → embedded in test
+Schema Registry    → external local service
+MySQL integration  → external local service
+```
+
+A previous CI failure produced a Schema Registry `Connection refused`; after the infrastructure dependency was restored, the test succeeded without changing application logic.
+
+### Spring Context Smoke Tests
+
+Both services contain a basic `contextLoads()` test.
+
+These verify:
+
+```text
+Spring configuration
+    ↓
+ApplicationContext starts
+    ↓
+no startup/wiring exception
+```
+
+They are useful smoke tests, but they are not treated as substitutes for business-behavior tests.
+
+### Jenkins Test Gates
+
+Jenkins executes tests before package and Docker-image creation.
+
+Order Service:
+
+```bash
+./mvnw test -Dspring.datasource.url=jdbc:mysql://host.docker.internal:3306/order_db
+```
+
+Inventory Service:
+
+```bash
+TEST_DB_URL=jdbc:mysql://host.docker.internal:3306/inventory_test_db \
+TEST_SCHEMA_REGISTRY_URL=http://host.docker.internal:8081 \
+./mvnw test
+```
+
+Pipeline behavior:
+
+```text
+test failure
+    ↓
+pipeline stops
+    ↓
+normal package/image progression does not continue
+
+test success
+    ↓
+package
+    ↓
+archive
+    ↓
+Docker build
+```
+
+### Manual End-to-End Verification
+
+Automated tests are supplemented by full runtime verification using the actual services, Kafka cluster, Schema Registry, MySQL, and outbox publishers.
+
+A final reliability run verified a successful flow in which:
+
+- Order Service accepted the request;
+- the Order outbox event reached `PUBLISHED`;
+- Kafka acknowledged the Avro event;
+- Inventory Service processed it;
+- inventory stock changed;
+- the inventory result returned through Kafka;
+- Order Service reached `INVENTORY_RESERVED`;
+- no Order outbox row from that verification remained stuck `PENDING`.
+
+Manual verification was also used for duplicate delivery, Retry/DLT, monitoring alerts, webhook triggering, and post-deployment health checks.
+
+These are documented as runtime evidence rather than automated regression tests.
+
+### Current Automated-Test Gaps
+
+The repository does not currently contain dedicated automated tests for every implemented path.
+
+Notable gaps include:
+
+- Order Service inventory-result consumer idempotency and status transitions;
+- Inventory Outbox Publisher timeout/failure behavior;
+- a single automated two-service end-to-end test;
+- Docker/Compose infrastructure lifecycle;
+- deployment rollback behavior;
+- Grafana alert provisioning;
+- GitHub webhook/ngrok integration.
+
+These are future hardening opportunities, not features claimed as already covered.
+
+### Verification Strategy Summary
+
+```text
+Unit tests
+    → business branches + outbox state transitions
+
+Spring context tests
+    → service wiring/startup
+
+MySQL integration
+    → real persistence behavior
+
+Embedded Kafka integration
+    → Retry → DLT + metadata + Avro payload
+
+Jenkins
+    → executes test gates before build
+
+Manual E2E
+    → validates complete local runtime flow
+```
+
+This gives the project multiple verification layers while keeping automated proof and manual runtime evidence clearly separated.
+
