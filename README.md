@@ -818,6 +818,214 @@ inventory.reservation.failed
 
 are currently serialized as JSON by `InventoryValueSerializer`. This is intentional documentation of the **current repository state**; the project does not claim that every Kafka topic uses Avro.
 
+## Inventory Result Events & Order Status Lifecycle
+
+The platform does not stop after Inventory Service updates stock. Inventory publishes a result event back to Kafka, and Order Service consumes that result to move the order to its next business state.
+
+### Result Event Flow
+
+```mermaid
+flowchart LR
+    Pending[Order status\npending]
+
+    Inventory[Inventory Service]
+    InvOutbox[(inventory outbox\nPENDING)]
+    ReservedTopic[Kafka\ninventory.reserved]
+    FailedTopic[Kafka\ninventory.reservation.failed]
+
+    ReservedConsumer[InventoryReservedConsumer]
+    FailedConsumer[InventoryReservationFailedConsumer]
+
+    Reserved[Order status\nINVENTORY_RESERVED]
+    Rejected[Order status\nINVENTORY_REJECTED]
+
+    Pending --> Inventory
+    Inventory --> InvOutbox
+
+    InvOutbox -->|stock reserved| ReservedTopic
+    InvOutbox -->|insufficient stock| FailedTopic
+
+    ReservedTopic --> ReservedConsumer
+    FailedTopic --> FailedConsumer
+
+    ReservedConsumer --> Reserved
+    FailedConsumer --> Rejected
+```
+
+### Inventory Result Events
+
+Inventory creates one of two JSON result events inside its business transaction.
+
+| Result | Kafka topic | Event type | Meaning |
+|---|---|---|---|
+| reservation successful | `inventory.reserved` | `INVENTORY_RESERVED` | requested stock was reserved |
+| insufficient stock | `inventory.reservation.failed` | `INVENTORY_RESERVATION_FAILED` | request was handled but stock was not available |
+
+Both result event types carry correlation data:
+
+- a new result `eventId`;
+- `sourceEventId` pointing back to the original order-created event;
+- `orderId`;
+- `productId`;
+- `quantity`;
+- result `status`;
+- result timestamp;
+- rejection `reason` for the failure event.
+
+This allows Order Service to correlate an asynchronous inventory response with the original order flow.
+
+### Inventory Outbox Publication
+
+The Inventory Outbox Publisher runs every second and reads `PENDING` result rows.
+
+```text
+Inventory transaction
+    ↓
+result event stored as PENDING
+    ↓
+Inventory Outbox Publisher
+    ↓
+JSON serialization
+    ↓
+Kafka publish using orderId as key
+    ↓
+Kafka send completes
+    ↓
+outbox row becomes PUBLISHED
+```
+
+If the publisher throws while sending, the row is not changed to `PUBLISHED`, so it remains available for a later scheduler run.
+
+> **Current implementation boundary:** unlike the Order Outbox Publisher, the Inventory Outbox Publisher currently waits on `KafkaTemplate.send(...).get()` without its own explicit application-level timeout. The documentation therefore does not claim identical timeout hardening on both outbox publishers.
+
+### Order Service Result Consumers
+
+Order Service consumes the two result topics using consumer group:
+
+```text
+order-service-group
+```
+
+Auto commit is disabled and the listeners use:
+
+```properties
+spring.kafka.consumer.enable-auto-commit=false
+spring.kafka.listener.ack-mode=manual_immediate
+```
+
+The result topics use JSON deserialization rather than Avro.
+
+### Successful Order Path
+
+For `inventory.reserved`:
+
+1. `InventoryReservedConsumer` receives the result.
+2. Order Service checks whether the result `eventId` already exists in its own `processed_events` table.
+3. If it is new, the order is loaded by `orderId`.
+4. Order status becomes `INVENTORY_RESERVED`.
+5. The consumed result event is saved to `processed_events`.
+6. The transaction completes.
+7. The Kafka offset is manually acknowledged.
+
+```text
+pending
+  ↓
+inventory.reserved
+  ↓
+INVENTORY_RESERVED
+```
+
+### Rejected Order Path
+
+For `inventory.reservation.failed`:
+
+1. `InventoryReservationFailedConsumer` receives the JSON event.
+2. Order Service performs the same `eventId` duplicate check.
+3. The matching order is loaded.
+4. Order status becomes `INVENTORY_REJECTED`.
+5. The result event is saved in `processed_events`.
+6. The transaction completes.
+7. The Kafka offset is manually acknowledged.
+
+```text
+pending
+  ↓
+inventory.reservation.failed
+  ↓
+INVENTORY_REJECTED
+```
+
+The failure event also carries the business reason, currently:
+
+```text
+Insufficient stock
+```
+
+### Idempotency on the Return Path
+
+Order Service applies idempotency to inventory result events too.
+
+The `processed_events.event_id` column is unique, and before changing order status the service checks:
+
+```text
+processedEventRepository.existsByEventId(eventId)
+```
+
+If Kafka redelivers the same reservation or rejection event:
+
+```text
+duplicate result event
+    ↓
+eventId already exists
+    ↓
+order status is not updated again
+    ↓
+duplicate is logged
+    ↓
+Kafka offset is acknowledged
+```
+
+So idempotency exists on **both sides** of the asynchronous business flow:
+
+```text
+OrderCreatedEvent
+    ↓
+Inventory Service idempotency
+    ↓
+Inventory result event
+    ↓
+Order Service idempotency
+```
+
+### Transactional Status Update Hardening
+
+During this documentation review, the reservation-success path was found to be missing `@Transactional` on `markInventoryReserved(...)`, while the rejection path already had it.
+
+The success path was corrected so that:
+
+```text
+order status update
+        +
+processed-event insert
+        ↓
+same Order Service MySQL transaction
+```
+
+This keeps the reservation and rejection consumers consistent and closes a failure window where the order status and processed-event marker could otherwise have been committed independently.
+
+### Technical Failure State
+
+A technical Inventory processing failure is different from a business rejection.
+
+If the original `OrderCreatedEvent` exhausts retries and goes to `orders.created.avro-dlt`, the current code does **not** automatically publish an inventory rejection result to Order Service.
+
+Therefore, in the current implementation, that order can remain in `pending` until the failed event is investigated and successfully replayed or another recovery action is taken.
+
+This distinction is intentional in the documentation:
+
+- **insufficient stock** → handled business result → `INVENTORY_REJECTED`;
+- **technical processing failure** → Retry → DLT → operator/recovery workflow.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
@@ -848,7 +1056,7 @@ are currently serialized as JSON by `InventoryValueSerializer`. This is intentio
 
 1. Client sends an order request to `order-service`.
 2. `order-service` creates an Avro order event.
-3. The event is published to the Kafka topic `orders.created`.
+3. The event is published to the Kafka topic `orders.created.avro`.
 4. `inventory-service` consumes the event.
 5. The consumer checks whether the event was already processed.
 6. Inventory is updated inside a MySQL transaction.
