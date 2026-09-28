@@ -514,6 +514,136 @@ offset can be acknowledged safely
 
 This is the project's main protection against duplicate business effects while still using at-least-once Kafka delivery.
 
+## Retry, Error Handling, DLT & Replay
+
+Technical failures in the Inventory consumer are handled by Spring Kafka's `DefaultErrorHandler`. Expected business outcomes such as insufficient stock are handled inside the business transaction and are **not** sent through the technical retry/DLT path.
+
+### Retry Policy
+
+The committed error-handler configuration uses:
+
+```java
+new FixedBackOff(2000L, 2L)
+```
+
+That means:
+
+```text
+Initial processing attempt
+    ↓ failure
+wait 2 seconds
+    ↓
+Retry 1
+    ↓ failure
+wait 2 seconds
+    ↓
+Retry 2
+    ↓ failure
+publish to DLT
+```
+
+So a failing record can be processed **up to three times total**: one initial attempt plus two retries.
+
+### DLT Routing
+
+After retries are exhausted, `DeadLetterPublishingRecoverer` sends the record to:
+
+```text
+<original-topic>-dlt
+```
+
+For the current Avro source topic:
+
+```text
+orders.created.avro
+        ↓
+orders.created.avro-dlt
+```
+
+The recoverer keeps the same partition number as the failed source record.
+
+Additional safeguards in the current configuration:
+
+- `setFailIfSendResultIsError(true)` prevents a failed DLT publish from being treated as successful recovery.
+- `setCommitRecovered(true)` allows the recovered source offset to be committed after successful DLT recovery, preventing the same poison record from blocking normal consumption indefinitely.
+
+### Technical Failure vs Business Rejection
+
+These two paths are intentionally different:
+
+| Scenario | Handling |
+|---|---|
+| Inventory exists but stock is insufficient | Create `INVENTORY_RESERVATION_FAILED` business event, commit, ACK source record |
+| Inventory row is missing / processing throws | Retry twice with 2-second backoff |
+| Technical failure still exists after retries | Publish source record to `orders.created.avro-dlt` |
+
+This separation prevents normal business rejection from being mistaken for an infrastructure/application failure.
+
+### DLT Failure Metadata
+
+Spring Kafka attaches recovery headers to DLT records. The integration test verifies important metadata including:
+
+- original Kafka topic;
+- exception cause class;
+- exception message;
+- original event key and Avro payload.
+
+The test deliberately publishes an order event with `productId=999`. Because no inventory row exists for that product, processing throws `IllegalArgumentException`, retries are exhausted, and the record is recovered to the DLT.
+
+### DLT Inspection Consumer
+
+`InventoryDltConsumer` uses a separate consumer group:
+
+```text
+inventory-dlt-inspection-group
+```
+
+It consumes raw DLT bytes, then explicitly uses `KafkaAvroDeserializer` with Schema Registry to decode the original `OrderCreatedEvent`.
+
+```text
+orders.created.avro-dlt
+    ↓
+ByteArrayDeserializer
+    ↓
+KafkaAvroDeserializer
+    ↓
+log orderId / productId / quantity / amount / occurredAt
+    ↓
+manual ACK
+```
+
+This keeps DLT inspection separate from the normal `inventory-service-group` business consumer.
+
+### Replay Support — Current Repository Boundary
+
+The repository contains `InventoryDltReplayRunner`, enabled only when:
+
+```properties
+app.dlt.replay.enabled=true
+```
+
+The normal application configuration keeps this disabled:
+
+```properties
+app.dlt.replay.enabled=false
+```
+
+The current runner is a **controlled proof-of-concept replay utility**, not a general production replay engine. In the committed code it:
+
+- assigns directly to DLT partition `1`;
+- scans from the beginning for up to 30 seconds;
+- matches one hard-coded `orderId` and `eventId`;
+- republishes only that matching Avro event to `orders.created.avro`;
+- exits after the replay succeeds.
+
+A production-grade replay process would remove those hard-coded identifiers and add operator-controlled selection, auditability, authorization, replay limits, and explicit duplicate/replay policies.
+
+### Verification
+
+The repository contains `InventoryRetryToDltIntegrationTests`, which starts an embedded Kafka broker and verifies that a deliberately failing Avro event reaches `orders.created.avro-dlt` with the expected failure metadata.
+
+> **Legacy utility note:** files under `scripts/` were created during an earlier pre-Avro phase and still reference `orders.created-dlt`. The current Java configuration and integration test use `orders.created.avro-dlt`; therefore the Java implementation is the source of truth until those helper scripts are modernized.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
@@ -533,7 +663,7 @@ This is the project's main protection against duplicate business effects while s
 - Consumer failure before acknowledgment
 - Retry of temporarily failed records
 - Repeated failure routed to DLT
-- DLT inspection and replay support
+- DLT inspection and controlled replay proof-of-concept
 - Schema-based Avro event communication
 - Database transaction with processed-event tracking
 - Transactional Outbox based event publishing
@@ -562,7 +692,7 @@ This is the project's main protection against duplicate business effects while s
 
 1. `inventory-service` consumes an event from Kafka.
 2. If business processing fails, the record is not acknowledged.
-3. Kafka retries the failed record according to the configured retry policy.
+3. Spring Kafka's error handler retries the failed record according to the configured retry policy.
 4. If processing still fails after the retry attempts, the record is sent to the Dead Letter Topic (DLT).
 5. The failed record is isolated in the DLT so the consumer can continue processing other records.
 6. The DLT record can be inspected and reprocessed later after the issue is fixed.
