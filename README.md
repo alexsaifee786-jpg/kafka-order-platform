@@ -136,6 +136,95 @@ flowchart LR
 - **Outbox publication:** a row becomes `PUBLISHED` only after the Kafka send completes successfully.
 - **Failure isolation:** bounded retries are followed by DLT recovery instead of infinite retry.
 
+## Kafka Cluster Architecture
+
+The local platform runs a **3-node Apache Kafka 4.3.1 KRaft cluster**. Each Kafka container is configured with both `broker` and `controller` roles, so the cluster does not depend on ZooKeeper.
+
+```mermaid
+flowchart TB
+    Producer[Order / Inventory Producers]
+
+    subgraph KafkaCluster[3-Node Kafka KRaft Cluster]
+        B1[Broker 1 + Controller\nnode.id=1\nINTERNAL :19092\nEXTERNAL :9092]
+        B2[Broker 2 + Controller\nnode.id=2\nINTERNAL :19092\nEXTERNAL :9094]
+        B3[Broker 3 + Controller\nnode.id=3\nINTERNAL :19092\nEXTERNAL :9096]
+    end
+
+    Consumer[Order / Inventory Consumers]
+    Registry[Schema Registry]
+
+    Producer --> B1
+    Producer --> B2
+    Producer --> B3
+
+    B1 <--> B2
+    B2 <--> B3
+    B3 <--> B1
+
+    B1 --> Consumer
+    B2 --> Consumer
+    B3 --> Consumer
+
+    Registry --> B1
+    Registry --> B2
+    Registry --> B3
+```
+
+### KRaft Controller Quorum
+
+All three nodes participate in the controller quorum:
+
+```text
+1@kop-kafka-1:19093
+2@kop-kafka-2:19093
+3@kop-kafka-3:19093
+```
+
+KRaft manages Kafka cluster metadata and controller elections. Business records are still written to topic partition leaders and replicated between brokers.
+
+### Internal vs External Listeners
+
+Each broker exposes separate listeners for Docker-internal communication and Windows-host access.
+
+| Broker | Docker internal listener | Host access |
+|---|---|---|
+| `kop-kafka-1` | `kop-kafka-1:19092` | `localhost:9092` |
+| `kop-kafka-2` | `kop-kafka-2:19092` | `localhost:9094` |
+| `kop-kafka-3` | `kop-kafka-3:19092` | `localhost:9096` |
+
+The Spring Boot services use the host ports when running directly on Windows. When Jenkins deploys the services as Docker containers, the same applications use the internal broker addresses on the `kafka-order-platform_default` network.
+
+### Replication and Durability Settings
+
+The committed Docker configuration includes:
+
+- `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=3`
+- `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=3`
+- `KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=2`
+- persistent Docker volumes for each Kafka broker
+- producer `acks=all` in `order-service`
+
+For a replicated topic, the **leader** handles reads/writes and **followers** copy the partition data. The ISR (in-sync replica set) represents replicas sufficiently caught up with the leader.
+
+> **Repository boundary:** the current repository does not contain a dedicated topic-provisioning script that declares the business-topic replication factor or `min.insync.replicas`. Those values should therefore be verified from the running Kafka topic configuration before they are presented as source-controlled settings.
+
+### Kafka Network Paths
+
+```text
+Windows-host application
+    -> localhost:9092 / 9094 / 9096
+
+Docker-deployed application
+    -> kop-kafka-1:19092
+    -> kop-kafka-2:19092
+    -> kop-kafka-3:19092
+
+Kafka controllers
+    -> broker-to-controller quorum on :19093
+```
+
+This separation prevents containers from advertising Windows-only `localhost` addresses to other containers while still allowing local development tools to connect from the host machine.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
