@@ -2667,7 +2667,7 @@ These are future hardening opportunities, not features claimed as already covere
 
 This chapter indexes the runtime evidence stored in the repository and suggests optional additional captures for a more detailed project walkthrough.
 
-**Evidence inventory:** ten PNG files are currently committed under [docs/screenshots](docs/screenshots/): four monitoring captures, one Jenkins job overview, two Docker Desktop container views, and three Docker Hub repository/tag views. Optional additional captures are listed below for a more detailed walkthrough; they are not prerequisites for project completion.
+**Evidence inventory:** sixteen PNG files are currently committed under [docs/screenshots](docs/screenshots/): four monitoring captures, one Jenkins job overview, two Docker Desktop container views, three Docker Hub repository/tag views, and six MySQL table views. Optional additional captures are listed below for a more detailed walkthrough; they are not prerequisites for project completion.
 
 A screenshot records one observation at one point in time. It does not establish current system health or replace the automated tests described in [Testing Strategy & Verification Evidence](#testing-strategy--verification-evidence).
 
@@ -2773,6 +2773,62 @@ Published tags do not establish successful completion of the entire pipeline or 
 
 The current Jenkins deployment uses locally built images after pushing them; these screenshots do not imply a registry pull during deployment. Browser tabs/address bars and the Windows taskbar were cropped out; the Docker Hub page content was preserved.
 
+### MySQL Persistence and Event Processing Evidence
+
+These six captures show persisted data from the local Order and Inventory databases. They include historical rows from different runs, rather than one continuous end-to-end execution.
+
+| Capture | Visible evidence |
+|---|---|
+| [Order statuses](docs/screenshots/mysql-order-status.png) | Orders with `INVENTORY_RESERVED`, alongside older `PENDING` rows |
+| [Order outbox](docs/screenshots/mysql-order-outbox.png) | `ORDER_CREATED` rows with event IDs, order IDs, topic names, and `PUBLISHED` status |
+| [Order processed events](docs/screenshots/mysql-order-processed-events.png) | Records for `inventory.reserved` and `inventory.reservation.failed` |
+| [Inventory stock](docs/screenshots/mysql-inventory-stock.png) | Product `9282026001`, available stock `7`, and version `3` |
+| [Inventory result outbox](docs/screenshots/mysql-inventory-outbox.png) | `INVENTORY_RESERVED` events for orders `27`, `28`, and `29` |
+| [Inventory processed events](docs/screenshots/mysql-inventory-processed-events.png) | Source events for orders `27`, `28`, and `29` on `orders.created.avro`, partition `0`, offsets `2`, `3`, and `4` |
+
+<details>
+<summary>View the six MySQL screenshots</summary>
+
+#### Order Statuses
+
+![MySQL Order table showing historical pending and inventory-reserved orders](docs/screenshots/mysql-order-status.png)
+
+The visible rows include reserved orders 10–16. The local table also contains legacy columns such as `cart_uuid` and `user_id`, which are not mapped by the current Order entity. Their presence does not imply implemented cart/user features.
+
+#### Order Outbox Publication
+
+![MySQL Order outbox showing published order-created events](docs/screenshots/mysql-order-outbox.png)
+
+The visible history includes both the older `orders.created` topic and the current `orders.created.avro` topic. The recorded `PUBLISHED` state demonstrates outbox publication state, not downstream completion by itself.
+
+#### Order Result Processing
+
+![MySQL Order processed-events table with inventory result topics](docs/screenshots/mysql-order-processed-events.png)
+
+The rows retain result-event identifiers, order identifiers, partitions, offsets, and processing times for both inventory result topics.
+
+#### Inventory Stock and Version
+
+![MySQL Inventory table showing stock 7 and version 3](docs/screenshots/mysql-inventory-stock.png)
+
+This is a current-value snapshot. Without a before-value, it does not establish how much stock a particular order deducted. The version column corresponds to the current entity's `@Version` field; this screenshot alone does not demonstrate an optimistic-lock conflict.
+
+#### Inventory Result Outbox
+
+![MySQL Inventory outbox showing reservation result events for orders 27 to 29](docs/screenshots/mysql-inventory-outbox.png)
+
+The view shows result-event IDs, order IDs, payload previews, and part of the `published_at` column. The status and topic columns are outside the captured horizontal viewport, so no visible `PUBLISHED` status is claimed for this image.
+
+#### Inventory Source-Event Processing
+
+![MySQL Inventory processed-events table showing Avro source events for orders 27 to 29](docs/screenshots/mysql-inventory-processed-events.png)
+
+The order IDs match the three visible Inventory result-outbox rows. Source-event IDs and result-event IDs differ because they identify different events. These persisted processing records support the idempotency design; proving duplicate suppression also requires a redelivery observation and unchanged business state.
+
+</details>
+
+The Order-side views show older rows than the Inventory-side views, so these images are not presented as a single correlated order lifecycle. Query text and result grids were preserved; surrounding desktop UI, schema navigation, and the action-output pane were cropped out. No database values were edited.
+
 ### Optional Additional Runtime Evidence
 
 All filenames below are **proposed capture names, not existing files**. Add links only after the actual captures are committed.
@@ -2784,9 +2840,7 @@ All filenames below are **proposed capture names, not existing files**. Add link
 | Pending capture | `kafka-cluster-topics.png` | Broker/topic output for the actual Avro flow, including partitions, replicas, and ISR |
 | Pending capture | `kafka-consumer-lag.png` | Consumer group, topic partitions, committed offsets, log-end offsets, and lag after the sample run |
 | Pending capture | `order-api-response.png` | Request and response for one sample order, with its order ID visible |
-| Pending capture | `order-outbox-published.png` | The matching Order outbox row, event ID, topic, and `PUBLISHED` state |
-| Pending capture | `inventory-db-processing.png` | Stock before/after and the matching processed-event record |
-| Pending capture | `order-final-status.png` | The same order reaching `INVENTORY_RESERVED` after the inventory result returns |
+| Partial evidence | `inventory-db-processing.png` | Stock and processed-event snapshots are committed above; an optional before/after capture would establish the deduction for one correlated order |
 | Pending capture | `duplicate-event-skipped.png` | Redelivery of the same event ID, duplicate-skip log, and unchanged stock after redelivery |
 | Pending capture | `retry-dlt-evidence.png` | A technical processing failure, exhausted retries, and the matching record in `orders.created.avro-dlt` |
 | Pending capture | `jenkins-pipeline-success.png` | Build number, source revision, stages, and final successful result |
@@ -2839,7 +2893,7 @@ Save captures under `docs/screenshots/` using descriptive filenames. Include a s
 
 Capture only the relevant output. Remove credentials, authorization headers, tokens, personal email addresses, and unrelated records before committing. Preserve the identifiers needed to correlate the sample run. Retain useful log excerpts as text when screenshots would make the evidence difficult to read.
 
-The repository has ten committed monitoring, Jenkins, Docker Desktop, and Docker Hub captures, with suggestions for optional additional runtime evidence.
+The repository has sixteen committed monitoring, Jenkins, Docker Desktop, Docker Hub, and MySQL captures, with suggestions for optional additional runtime evidence.
 
 ## How to Run / Local Setup
 
