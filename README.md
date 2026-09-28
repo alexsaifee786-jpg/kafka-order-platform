@@ -1726,6 +1726,267 @@ Windows host
 
 This separation is important when debugging: an infrastructure container being healthy does not automatically mean the application container is ready, and an application container being started does not guarantee its dependencies or business endpoints are healthy.
 
+## CI Pipeline — Checkout, Test, Package, Archive & Docker Build
+
+The repository contains a declarative Jenkins pipeline in the root `Jenkinsfile`. The CI portion validates both Spring Boot services before any deployment approval or runtime replacement happens.
+
+### CI Flow
+
+```mermaid
+flowchart LR
+    GitHub[GitHub main branch]
+    Checkout[Checkout]
+    TestOrder[Test Order Service]
+    PackageOrder[Package Order Service]
+    ArchiveOrder[Archive Order JAR]
+    TestInventory[Test Inventory Service]
+    PackageInventory[Package Inventory Service]
+    ArchiveInventory[Archive Inventory JAR]
+    BuildOrder[Build Order Docker Image]
+    BuildInventory[Build Inventory Docker Image]
+
+    GitHub --> Checkout
+    Checkout --> TestOrder
+    TestOrder --> PackageOrder
+    PackageOrder --> ArchiveOrder
+    ArchiveOrder --> TestInventory
+    TestInventory --> PackageInventory
+    PackageInventory --> ArchiveInventory
+    ArchiveInventory --> BuildOrder
+    BuildOrder --> BuildInventory
+```
+
+The later Docker Hub, approval, deployment, and health-check stages belong to the delivery/deployment part of the pipeline and are documented separately.
+
+### 1. Checkout
+
+The pipeline checks out the `main` branch directly from the project repository:
+
+```text
+GitHub repository
+    ↓
+main branch
+    ↓
+Jenkins workspace
+```
+
+This gives the pipeline a fresh copy of the same source-controlled `Jenkinsfile`, Maven projects, Dockerfiles, tests, and configuration used by the repository.
+
+### 2. Test Order Service
+
+Inside `order-service/`, Jenkins first makes the Maven Wrapper executable and runs:
+
+```bash
+./mvnw test -Dspring.datasource.url=jdbc:mysql://host.docker.internal:3306/order_db
+```
+
+The database URL is overridden because Jenkins runs inside Docker while MySQL is running on the Windows host.
+
+```text
+Jenkins container
+    ↓
+host.docker.internal:3306
+    ↓
+order_db
+```
+
+If the Order Service test phase fails, Jenkins does not continue to packaging or image build stages.
+
+### 3. Package Order Service
+
+After tests pass:
+
+```bash
+./mvnw package -DskipTests
+```
+
+The tests are skipped in this stage because they already ran in the dedicated test stage.
+
+The result is the executable Spring Boot JAR under:
+
+```text
+order-service/target/
+```
+
+### 4. Archive Order Artifact
+
+Jenkins archives:
+
+```text
+order-service/target/*.jar
+```
+
+This preserves the packaged Order Service JAR as a Jenkins build artifact, separate from the later Docker image.
+
+### 5. Test Inventory Service
+
+The Inventory Service test stage needs both MySQL and Schema Registry connectivity.
+
+Jenkins runs:
+
+```bash
+TEST_DB_URL=jdbc:mysql://host.docker.internal:3306/inventory_test_db \
+TEST_SCHEMA_REGISTRY_URL=http://host.docker.internal:8081 \
+./mvnw test
+```
+
+The dedicated test database prevents Inventory integration tests from using the normal runtime `inventory_db`.
+
+The Schema Registry override is required by the Avro/DLT integration path:
+
+```text
+Inventory tests
+    ├── inventory_test_db on Windows host
+    └── Schema Registry :8081
+```
+
+The repository history includes specific CI-oriented changes that made these dependencies configurable rather than hard-coded for one execution environment.
+
+### 6. Package Inventory Service
+
+After Inventory tests pass:
+
+```bash
+./mvnw package -DskipTests
+```
+
+The resulting JAR is generated under:
+
+```text
+inventory-service/target/
+```
+
+### 7. Archive Inventory Artifact
+
+Jenkins archives:
+
+```text
+inventory-service/target/*.jar
+```
+
+At this point both application JARs are preserved as build artifacts.
+
+### 8. Build Docker Images
+
+Only after both services have passed their tests and packaging stages does Jenkins build the application images.
+
+Order Service:
+
+```bash
+docker build -t order-service:${BUILD_NUMBER} ./order-service
+```
+
+Inventory Service:
+
+```bash
+docker build -t inventory-service:${BUILD_NUMBER} ./inventory-service
+```
+
+Each image is tagged with Jenkins' `BUILD_NUMBER`.
+
+Example:
+
+```text
+order-service:28
+inventory-service:28
+```
+
+This creates a direct relationship between:
+
+```text
+Jenkins build #28
+        ↓
+order-service:28
+inventory-service:28
+```
+
+instead of repeatedly overwriting only a generic local tag.
+
+### Build Order Matters
+
+The current CI sequence intentionally validates source code before creating deployable images:
+
+```text
+Checkout
+   ↓
+Tests
+   ↓
+Package
+   ↓
+Archive
+   ↓
+Docker build
+```
+
+A failed test therefore prevents the pipeline from producing a new candidate application image in the normal flow.
+
+### Maven Wrapper
+
+The pipeline uses the repository Maven Wrapper:
+
+```text
+./mvnw
+```
+
+rather than depending on a separately installed Maven version inside Jenkins.
+
+This improves build reproducibility because the project controls the Maven Wrapper configuration used by the build.
+
+### CI Dependencies
+
+The current Jenkins tests are not completely isolated from external local infrastructure.
+
+| Test area | External dependency used by current pipeline |
+|---|---|
+| Order Service tests | host MySQL `order_db` |
+| Inventory Service DB integration | host MySQL `inventory_test_db` |
+| Inventory Avro/DLT integration | Schema Registry on host port `8081` |
+| Kafka DLT integration | embedded Kafka broker started by the test |
+
+This means CI success currently assumes the required host services are available to the Jenkins container.
+
+> **Current CI boundary:** this is a local Jenkins CI environment, not a self-contained cloud CI runner. MySQL and Schema Registry are external runtime dependencies for parts of the current test suite.
+
+### Evolution of the CI Pipeline
+
+The repository history shows the CI path being built incrementally:
+
+```text
+Add Jenkins CI pipeline
+        ↓
+Make test DB URL configurable
+        ↓
+Use test profile for DLT integration
+        ↓
+Make Schema Registry URL configurable
+        ↓
+Add application Dockerfiles
+        ↓
+Add Docker image build stages
+```
+
+This progression matters because the pipeline was adapted to the real execution environment instead of assuming that local `localhost` settings would also work from inside the Jenkins container.
+
+### CI Responsibility Boundary
+
+```text
+CI validates and packages:
+    checkout
+    tests
+    JARs
+    archived artifacts
+    Docker images
+
+Delivery / deployment handles:
+    registry login
+    image push
+    manual approval
+    local deployment
+    health verification
+```
+
+Keeping these responsibilities conceptually separate makes pipeline failures easier to diagnose: a unit/integration-test failure is a CI problem, while a deployment-readiness failure belongs to the later delivery stage.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
