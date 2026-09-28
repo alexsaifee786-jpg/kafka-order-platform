@@ -3226,3 +3226,111 @@ Manual E2E
 
 This gives the project multiple verification layers while keeping automated proof and manual runtime evidence clearly separated.
 
+## Runtime Evidence & Screenshots
+
+This chapter indexes the runtime evidence stored in the repository and identifies the captures still needed for a complete project walkthrough.
+
+**Evidence inventory:** four PNG files are currently committed under [docs/screenshots](docs/screenshots/). They cover monitoring. Kafka, database, Jenkins, and Docker Hub screenshots are not yet committed in that folder.
+
+A screenshot records one observation at one point in time. It does not establish current system health or replace the automated tests described in [Testing Strategy & Verification Evidence](#testing-strategy--verification-evidence).
+
+### Available Monitoring Captures
+
+The existing monitoring chapter describes these captures. The links below point to the committed files.
+
+| Capture | Repository file | Evidence scope |
+|---|---|---|
+| Prometheus target | [prometheus-target-up.png](docs/screenshots/prometheus-target-up.png) | Target reachability during the captured scrape |
+| Grafana dashboard | [grafana-monitoring-dashboard.png](docs/screenshots/grafana-monitoring-dashboard.png) | Monitoring panels during the selected time range |
+| Alert firing | [grafana-alert-firing.png](docs/screenshots/grafana-alert-firing.png) | Recorded service-down alert state |
+| Alert resolved | [grafana-alert-resolved.png](docs/screenshots/grafana-alert-resolved.png) | Recorded recovery / resolved state |
+
+<details>
+<summary>View the committed monitoring screenshots</summary>
+
+#### Prometheus Target
+
+![Prometheus target capture](docs/screenshots/prometheus-target-up.png)
+
+#### Grafana Dashboard
+
+![Grafana monitoring dashboard capture](docs/screenshots/grafana-monitoring-dashboard.png)
+
+#### Alert Firing
+
+![Grafana alert firing capture](docs/screenshots/grafana-alert-firing.png)
+
+#### Alert Resolved
+
+![Grafana alert resolved capture](docs/screenshots/grafana-alert-resolved.png)
+
+</details>
+
+These captures document the monitoring exercise. They do not establish that SMTP notifications are currently enabled; the committed Compose configuration disables SMTP by default.
+
+### Remaining Runtime Evidence Checklist
+
+All filenames below are **proposed capture names, not existing files**. Add links only after the actual captures are committed.
+
+| Status | Suggested filename | What the capture should show |
+|---|---|---|
+| Pending capture | `kafka-cluster-topics.png` | Broker/topic output for the actual Avro flow, including partitions, replicas, and ISR |
+| Pending capture | `kafka-consumer-lag.png` | Consumer group, topic partitions, committed offsets, log-end offsets, and lag after the sample run |
+| Pending capture | `order-api-response.png` | Request and response for one sample order, with its order ID visible |
+| Pending capture | `order-outbox-published.png` | The matching Order outbox row, event ID, topic, and `PUBLISHED` state |
+| Pending capture | `inventory-db-processing.png` | Stock before/after and the matching processed-event record |
+| Pending capture | `order-final-status.png` | The same order reaching `INVENTORY_RESERVED` after the inventory result returns |
+| Pending capture | `duplicate-event-skipped.png` | Redelivery of the same event ID, duplicate-skip log, and unchanged stock after redelivery |
+| Pending capture | `retry-dlt-evidence.png` | A technical processing failure, exhausted retries, and the matching record in `orders.created.avro-dlt` |
+| Pending capture | `jenkins-pipeline-success.png` | Build number, source revision, stages, and final successful result |
+| Pending capture | `dockerhub-versioned-images.png` | Both service repositories with the matching Jenkins build-number tags |
+| Pending capture | `deployed-services-health.png` | Running service containers/image tags and both Actuator health responses |
+| Pending capture | `github-webhook-delivery.png` | Successful webhook delivery linked to the Jenkins-triggering event, with sensitive values removed |
+
+A missing screenshot is an evidence-packaging gap; it does not by itself mean the implementation is missing. Existing runtime descriptions remain documented observations until their associated captures or logs are committed.
+
+### Capture One Traceable Successful Run
+
+Use one order across the API, Kafka, database, and final-status captures so a reviewer can follow the same operation.
+
+1. Record the source commit, runtime mode, capture date/time with timezone, and initial stock.
+2. Submit a sample order and retain the returned order ID.
+3. Locate its Order outbox record and record the event ID and publication state.
+4. Match that source event ID to Inventory processing; capture stock after processing and the processed-event row.
+5. Capture the inventory result and the corresponding final Order status.
+6. Check consumer lag after processing settles.
+
+Record event IDs separately for the order-created event and inventory-result event; different events may have different IDs. Use the order ID to correlate the complete business flow.
+
+**Interpretation limits:** zero lag means the consumer has caught up with the observed log end; it does not alone prove a correct stock update. Likewise, `PUBLISHED` establishes the recorded outbox publication state, not completion of every downstream business step.
+
+### Capture Failure Scenarios Separately
+
+| Scenario | Evidence to retain | Boundary to demonstrate |
+|---|---|---|
+| Duplicate delivery | Same source event ID, duplicate-skip log, stock before/after redelivery | No second inventory deduction |
+| Technical processing failure | Correlated failure/retry logs and DLT record with original-topic/exception metadata | Retry exhaustion routes the failing event to DLT |
+| Insufficient stock | Failed reservation result and resulting order state | A business rejection follows the inventory-result flow; it is distinct from a technical Retry/DLT failure |
+| Service outage and recovery | Time-correlated firing and resolved monitoring captures | Alert state changes across the outage and recovery |
+
+Do not combine unrelated runs into a single apparent sequence. A recovered service, a published event, and a successful Jenkins job may belong to different executions unless the identifiers and timestamps connect them.
+
+### Link Build, Registry, and Deployment Evidence
+
+For a CI/CD walkthrough, retain the relationship between:
+
+- the Git commit Jenkins checked out;
+- Jenkins build number and successful test/build stages;
+- the two Docker Hub image tags published for that build;
+- the approved deployment and running local container image tags;
+- both post-deployment health responses.
+
+The current deployment runs locally built images. Docker Hub tag screenshots establish registry publication; they do not prove that deployment pulled those images from the registry. Actuator health responses establish the health result at capture time; the order-processing evidence is still needed to demonstrate the business flow.
+
+### Evidence Capture Conventions
+
+Save captures under `docs/screenshots/` using descriptive filenames. Include a short caption or accompanying note with the scenario, timestamp/timezone, source revision or Jenkins build number, relevant order/event IDs, and observed result.
+
+Capture only the relevant output. Remove credentials, authorization headers, tokens, personal email addresses, and unrelated records before committing. Preserve the identifiers needed to correlate the sample run. Retain useful log excerpts as text when screenshots would make the evidence difficult to read.
+
+The current repository therefore has a committed monitoring gallery and an explicit capture checklist for the remaining runtime evidence.
