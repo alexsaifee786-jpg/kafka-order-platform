@@ -225,6 +225,145 @@ Kafka controllers
 
 This separation prevents containers from advertising Windows-only `localhost` addresses to other containers while still allowing local development tools to connect from the host machine.
 
+## Order Processing & Transactional Outbox
+
+The Order Service accepts the HTTP request, persists the business order, and stores the outgoing event in an outbox row **inside the same MySQL transaction**. Kafka publishing happens afterward through a scheduled outbox publisher.
+
+### Order API
+
+```http
+POST /api/orders
+Content-Type: application/json
+```
+
+Request fields:
+
+```json
+{
+  "productId": 501,
+  "quantity": 2,
+  "amount": 1499.00
+}
+```
+
+Validation is applied before business processing:
+
+- `productId` must be present and positive.
+- `quantity` must be present and positive.
+- `amount` must be present and at least `0.01`.
+
+The client does not provide the database order ID. MySQL generates the numeric `orderId`, while the service also generates a unique `orderUuid`.
+
+### Same-Transaction Write
+
+`OrderApplicationService.createOrder()` is marked with `@Transactional`.
+
+Within that transaction the service:
+
+1. creates an `orders` row with initial status `pending`;
+2. creates an `OrderCreatedEvent`;
+3. serializes the event into the outbox payload;
+4. creates an `outbox_events` row with:
+   - `eventType = ORDER_CREATED`
+   - `status = PENDING`
+   - target topic = `orders.created.avro`;
+5. commits the order and outbox row together.
+
+```mermaid
+flowchart LR
+    Request[POST /api/orders] --> Controller[OrderController]
+    Controller --> Service[OrderApplicationService\n@Transactional]
+    Service --> OrderRow[(orders)]
+    Service --> OutboxRow[(outbox_events\nORDER_CREATED · PENDING)]
+```
+
+This avoids the unsafe sequence of committing the order in MySQL and then depending on an immediate Kafka call to succeed before the event is durably recorded.
+
+### HTTP Response
+
+After the local database transaction succeeds, the controller returns:
+
+```text
+HTTP 202 Accepted
+Order accepted and queued for publishing, orderId=<generated-id>
+```
+
+The response means the order and its outbox event were accepted locally. It does **not** mean Inventory Service has already processed the event.
+
+### Outbox Publisher
+
+`OutboxPublisher` runs every second and reads `PENDING` rows ordered by creation time.
+
+For each row it:
+
+```text
+PENDING outbox row
+    ↓
+deserialize stored payload
+    ↓
+build Avro OrderCreatedEvent
+    ↓
+KafkaAvroSerializer + Schema Registry
+    ↓
+OrderEventProducer.publish()
+    ↓
+Kafka ACK
+    ↓
+mark outbox row PUBLISHED
+```
+
+The Kafka record key is the generated `orderId`, and the Avro event contains:
+
+- `eventId`
+- `orderId`
+- `productId`
+- `quantity`
+- `amount`
+- `status = CREATED`
+- `occurredAt`
+- `source = WEB`
+
+### Publishing Reliability
+
+The current Order Service configuration uses:
+
+- producer `acks=all`;
+- `max.block.ms=60000`;
+- `delivery.timeout.ms=120000`;
+- Schema Registry HTTP connect/read timeout = `60000 ms`;
+- outbox publish wait = `130000 ms`.
+
+The outbox row is changed to `PUBLISHED` only after the Kafka send completes successfully. If publishing fails or the publishing thread is interrupted, the row remains `PENDING` so it can be retried by a later scheduler run.
+
+### Why the Outbox Pattern Is Used
+
+Without the outbox, this failure window is possible:
+
+```text
+MySQL order commit
+    ↓
+application tries Kafka publish
+    ↓
+Kafka / network / Schema Registry failure
+    ↓
+order exists, but event may be missing
+```
+
+With the current design:
+
+```text
+Order + Outbox
+same MySQL transaction
+    ↓
+commit succeeds
+    ↓
+event is durably available as PENDING
+    ↓
+publisher retries until Kafka publish succeeds
+```
+
+This does not make MySQL and Kafka one distributed transaction. Instead, it removes the direct dual-write dependency by making the database the durable source for pending publication.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
