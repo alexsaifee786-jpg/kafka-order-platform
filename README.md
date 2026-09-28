@@ -2665,9 +2665,9 @@ These are future hardening opportunities, not features claimed as already covere
 
 ## Runtime Evidence & Screenshots
 
-This chapter indexes the runtime evidence stored in the repository and identifies the captures still needed for a complete project walkthrough.
+This chapter indexes the runtime evidence stored in the repository and suggests optional additional captures for a more detailed project walkthrough.
 
-**Evidence inventory:** seven PNG files are currently committed under [docs/screenshots](docs/screenshots/): four monitoring captures, one Jenkins job overview, and two Docker Desktop container views. Kafka topic/quorum/lag output, database results, Docker Hub tags, detailed Jenkins stages/source revision, and Actuator health captures remain pending.
+**Evidence inventory:** ten PNG files are currently committed under [docs/screenshots](docs/screenshots/): four monitoring captures, one Jenkins job overview, two Docker Desktop container views, and three Docker Hub repository/tag views. Optional additional captures are listed below for a more detailed walkthrough; they are not prerequisites for project completion.
 
 A screenshot records one observation at one point in time. It does not establish current system health or replace the automated tests described in [Testing Strategy & Verification Evidence](#testing-strategy--verification-evidence).
 
@@ -2747,7 +2747,33 @@ The second view includes the three broker rows and the Schema Registry row with 
 
 Only the Windows taskbar was cropped out. Docker Desktop content, including resource values, was preserved.
 
-### Remaining Runtime Evidence Checklist
+### Docker Hub Repositories and Versioned Images
+
+![Docker Hub repository listing showing the Order and Inventory service repositories](docs/screenshots/dockerhub-repositories.png)
+
+The repository listing shows `saifee162007/order-service` and `saifee162007/inventory-service` as public image repositories. The unrelated `my-devops-app` repository visible in the account listing is not part of this project.
+
+#### Order Service Image Tags
+
+![Docker Hub Order Service repository showing image tags 30 and 28](docs/screenshots/dockerhub-order-service-tags.png)
+
+#### Inventory Service Image Tags
+
+![Docker Hub Inventory Service repository showing image tags 30 and 28](docs/screenshots/dockerhub-inventory-service-tags.png)
+
+Both service repositories show tags **30** and **28**. This provides visible registry-publication evidence consistent with the current Jenkinsfile, which tags and pushes both service images using `BUILD_NUMBER`.
+
+| Visible evidence | What it establishes |
+|---|---|
+| Both service repositories | Separate published image repositories for Order and Inventory |
+| Tags `28` and `30` in both repositories | Matching numbered versions are present in Docker Hub |
+| Relative push times | Registry activity as displayed at capture time; not exact timestamps |
+
+Published tags do not establish successful completion of the entire pipeline or deployment health. In particular, tag `30` can exist even though the Jenkins overview above lists build #30 as unsuccessful: image push precedes deployment approval and health verification. The captures do not identify the cause of that build result, image digests, or the checked-out source revision.
+
+The current Jenkins deployment uses locally built images after pushing them; these screenshots do not imply a registry pull during deployment. Browser tabs/address bars and the Windows taskbar were cropped out; the Docker Hub page content was preserved.
+
+### Optional Additional Runtime Evidence
 
 All filenames below are **proposed capture names, not existing files**. Add links only after the actual captures are committed.
 
@@ -2764,7 +2790,6 @@ All filenames below are **proposed capture names, not existing files**. Add link
 | Pending capture | `duplicate-event-skipped.png` | Redelivery of the same event ID, duplicate-skip log, and unchanged stock after redelivery |
 | Pending capture | `retry-dlt-evidence.png` | A technical processing failure, exhausted retries, and the matching record in `orders.created.avro-dlt` |
 | Pending capture | `jenkins-pipeline-success.png` | Build number, source revision, stages, and final successful result |
-| Pending capture | `dockerhub-versioned-images.png` | Both service repositories with the matching Jenkins build-number tags |
 | Partial evidence | `deployed-services-health.png` | Container-running views are committed above; full image tags and both Actuator health responses still need a capture |
 | Pending capture | `github-webhook-delivery.png` | Successful webhook delivery linked to the Jenkins-triggering event, with sensitive values removed |
 
@@ -2814,7 +2839,7 @@ Save captures under `docs/screenshots/` using descriptive filenames. Include a s
 
 Capture only the relevant output. Remove credentials, authorization headers, tokens, personal email addresses, and unrelated records before committing. Preserve the identifiers needed to correlate the sample run. Retain useful log excerpts as text when screenshots would make the evidence difficult to read.
 
-The repository has seven committed monitoring, Jenkins, and Docker captures, with an explicit checklist for the remaining runtime evidence.
+The repository has ten committed monitoring, Jenkins, Docker Desktop, and Docker Hub captures, with suggestions for optional additional runtime evidence.
 
 ## How to Run / Local Setup
 
