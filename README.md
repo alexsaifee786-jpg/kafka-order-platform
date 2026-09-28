@@ -1,5 +1,33 @@
 # Kafka Order Platform
 
+**A Java 17 and Spring Boot backend for asynchronous order and inventory processing.**
+
+[Run locally](#how-to-run--local-setup) · [Architecture](#final-runtime-architecture) · [Tests](#testing-strategy--verification-evidence) · [Runtime evidence](#runtime-evidence--screenshots)
+
+**Contents**
+
+| Chapter | Documentation |
+|---|---|
+| 01 | [Project Overview](#project-overview) |
+| 02 | [Final Runtime Architecture](#final-runtime-architecture) |
+| 03 | [Kafka Cluster Architecture](#kafka-cluster-architecture) |
+| 04 | [Order Processing & Transactional Outbox](#order-processing--transactional-outbox) |
+| 05 | [Inventory Processing, Idempotency & Manual Acknowledgment](#inventory-processing-idempotency--manual-acknowledgment) |
+| 06 | [Retry, Error Handling, DLT & Replay](#retry-error-handling-dlt--replay) |
+| 07 | [Avro, Schema Registry & Schema Evolution](#avro-schema-registry--schema-evolution) |
+| 08 | [Inventory Result Events & Order Status Lifecycle](#inventory-result-events--order-status-lifecycle) |
+| 09 | [Monitoring, Metrics & Alerting](#monitoring-metrics--alerting) |
+| 10 | [Failure Scenarios, Recovery & Production-Readiness Fixes](#failure-scenarios-recovery--production-readiness-fixes) |
+| 11 | [Docker Architecture, Containers, Volumes & Networking](#docker-architecture-containers-volumes--networking) |
+| 12 | [CI Pipeline — Checkout, Test, Package, Archive & Docker Build](#ci-pipeline--checkout-test-package-archive--docker-build) |
+| 13 | [Docker Hub Registry, Credentials & Image Versioning](#docker-hub-registry-credentials--image-versioning) |
+| 14 | [Continuous Delivery — Approval, Deployment & Health Verification](#continuous-delivery--approval-deployment--health-verification) |
+| 15 | [GitHub Webhook, ngrok & Automatic Jenkins Trigger](#github-webhook-ngrok--automatic-jenkins-trigger) |
+| 16 | [Secrets, Credentials & Configuration Management](#secrets-credentials--configuration-management) |
+| 17 | [Testing Strategy & Verification Evidence](#testing-strategy--verification-evidence) |
+| 18 | [Runtime Evidence & Screenshots](#runtime-evidence--screenshots) |
+| 19 | [How to Run / Local Setup](#how-to-run--local-setup) |
+
 ## Project Overview
 
 Kafka Order Platform is an event-driven backend project built with Java 17, Spring Boot, Apache Kafka, MySQL, Avro, and Docker.
@@ -9,109 +37,72 @@ The project contains two independent Spring Boot services:
 - **order-service** — accepts order requests, stores order state in MySQL, writes events using the Transactional Outbox pattern, and publishes Avro events to Kafka.
 - **inventory-service** — consumes Kafka events, validates and updates inventory inside a MySQL transaction, prevents duplicate processing, and manually acknowledges Kafka offsets after successful processing.
 
-The platform implements production-style reliability and delivery practices such as:
+| Capability | Current implementation |
+|---|---|
+| Durable publication | Order and Inventory transactional outboxes |
+| Delivery reliability | At-least-once delivery, eventId idempotency, manual ACK, optimistic locking |
+| Error handling | Fixed-backoff retry, DLT inspection, controlled replay proof-of-concept |
+| Event contracts | Avro order-created events, JSON inventory results, Schema Registry |
+| Observability | Actuator, Micrometer, Inventory Prometheus scrape, local Grafana dashboard/alerts |
+| CI/CD | Maven test gates, Docker Hub build-number tags, manual approval, local deployment health checks |
+| Automatic build trigger | GitHub push webhook through ngrok to local Jenkins |
 
-- 3-node Kafka KRaft cluster
-- Transactional Outbox pattern
-- At-least-once event delivery
-- Idempotent consumer processing
-- Manual Kafka acknowledgment
-- Retry with fixed backoff
-- Dead Letter Topic (DLT)
-- Avro serialization with Schema Registry
-- MySQL transactional processing
-- Spring Boot Actuator and Micrometer
-- Prometheus and Grafana monitoring
-- Grafana service-down alerting and recovery-state monitoring
-- Dockerized services and infrastructure
-- Jenkins CI/CD pipeline
-- GitHub webhook-based automatic build triggering
-- Versioned Docker images
-- Docker Hub image publishing
-- Approval-based deployment
-- Post-deployment health verification
+### Scope and Evidence
 
-The goal of this project is not only to demonstrate a working Kafka producer-consumer flow, but also to show how common production-style failure scenarios—such as duplicate delivery, consumer crashes, publishing failures, retry exhaustion, schema communication delays, deployment failures, and service outages—can be handled, observed, and verified.
+This is an order-and-inventory backend demonstrating production-readiness patterns. It does not implement payment, shipping, live delivery tracking, or an AWS deployment.
 
-## Tech Stack
+- **Implemented:** source-controlled services, reliability mechanisms, infrastructure configuration, and Jenkins pipeline.
+- **Reported local verification:** order success/rejection, duplicate delivery, Retry/DLT, schema evolution, monitoring, and CI/CD exercises described in this guide.
+- **Committed runtime captures:** four monitoring screenshots; the remaining evidence checklist is explicitly pending.
+- **Current limitations:** committed database credentials need rotation/externalization; replay is a proof-of-concept; Grafana/Jenkins UI settings are not fully provisioned; deployment has no automatic rollback or zero-downtime guarantee.
 
-- Java 17
-- Spring Boot
-- Spring Kafka
-- Apache Kafka
-- Apache Avro
-- Schema Registry
-- Spring Data JPA
-- Hibernate
-- MySQL
-- Maven
-- Docker Compose
-- Spring Boot Actuator
-- Micrometer
-- Prometheus
-- Grafana
-## Project Structure
+Source configuration and test inventory were reviewed for the final documentation pass against [repository revision fa1d0caf](https://github.com/alexsaifee786-jpg/kafka-order-platform/tree/fa1d0cafdaac60c2e0ed43259546dd0ee149b7cf). The review did not rerun the test suite, deployment, or fresh-machine setup. Kafka exactly-once semantics across MySQL and Kafka are not claimed.
 
-```text
-kafka-order-platform/
-├── order-service/        # Order API, outbox publisher and result consumers
-├── inventory-service/    # Inventory processing, idempotency, retry/DLT and result outbox
-├── monitoring/           # Prometheus configuration
-├── scripts/              # Local failure/DLT helper scripts
-├── docs/screenshots/     # Runtime proof screenshots
-├── jenkins-docker/       # Custom Jenkins image with Docker CLI
-├── Jenkinsfile           # CI/CD pipeline
-├── docker-compose.yml    # Kafka, Schema Registry, Prometheus and Grafana
-├── .env.example          # Safe optional environment-variable template
-└── README.md
-```
+### Tech Stack
+
+| Area | Technologies |
+|---|---|
+| Application | Java 17, Spring Boot, Spring Kafka, Maven |
+| Persistence | MySQL, Spring Data JPA, Hibernate |
+| Events | Apache Kafka, Avro, Schema Registry |
+| Observability | Actuator, Micrometer, Prometheus, Grafana |
+| Delivery | Docker Compose, Jenkins, Docker Hub, GitHub Webhook, ngrok |
+
+### Project Structure
+
+| Path | Purpose |
+|---|---|
+| [order-service/](order-service/) | Order API, outbox publisher, inventory-result consumers |
+| [inventory-service/](inventory-service/) | Stock processing, idempotency, Retry/DLT, result outbox |
+| [monitoring/](monitoring/) | Prometheus scrape configuration |
+| [scripts/](scripts/) | Legacy failure/DLT helpers; check topic names before use |
+| [docs/screenshots/](docs/screenshots/) | Committed monitoring captures |
+| [jenkins-docker/](jenkins-docker/) | Jenkins image with Docker CLI |
+| [Jenkinsfile](Jenkinsfile) | CI/CD stages |
+| [docker-compose.yml](docker-compose.yml) | Kafka, Schema Registry, Prometheus, Grafana |
+| [.env.example](.env.example) | Optional local SMTP template |
 
 ## Final Runtime Architecture
 
 The runtime flow uses the Transactional Outbox pattern on both business sides so database changes and outgoing events are not treated as one unsafe dual-write operation.
 
 ```mermaid
-flowchart LR
-    Client[Client / Postman]
-    OrderService[Order Service]
-    OrderDB[(order_db)]
-    OrderOutbox[Order Outbox\nPENDING → PUBLISHED]
-    Schema[Schema Registry]
-    KafkaOrder[Kafka\norders.created.avro]
-    InventoryService[Inventory Service]
-    InventoryDB[(inventory_db)]
-    InventoryOutbox[Inventory Outbox\nPENDING → PUBLISHED]
-    Reserved[Kafka\ninventory.reserved]
-    Rejected[Kafka\ninventory.reservation.failed]
-    Retry[Retry\n2 retries · 2s backoff]
-    DLT[DLT\norders.created.avro-dlt]
-
-    Actuator[Actuator + Micrometer]
-    Prometheus[Prometheus]
-    Grafana[Grafana]
-
-    Client -->|POST /api/orders| OrderService
-    OrderService -->|same MySQL transaction| OrderDB
-    OrderService -->|write ORDER_CREATED event| OrderOutbox
-    OrderOutbox -->|Avro serialize| Schema
-    OrderOutbox -->|publish after polling| KafkaOrder
-
-    KafkaOrder --> InventoryService
-    InventoryService -->|idempotency + stock processing| InventoryDB
-    InventoryService -->|write result event| InventoryOutbox
-
-    InventoryOutbox -->|reservation success| Reserved
-    InventoryOutbox -->|insufficient stock| Rejected
-
-    Reserved -->|update order status| OrderService
-    Rejected -->|update order status| OrderService
-
-    InventoryService -->|processing exception| Retry
-    Retry -->|retries exhausted| DLT
-
-    InventoryService --> Actuator
-    Actuator --> Prometheus
-    Prometheus --> Grafana
+flowchart TD
+    Client["Client"] -->|"POST /api/orders"| Order["Order Service"]
+    Order -->|"One MySQL transaction"| ODB[("order_db: orders + outbox")]
+    ODB -->|"Poll PENDING rows"| OP["Order publisher"]
+    OP -. "Schema registration / lookup" .-> SR["Schema Registry"]
+    OP -->|"Avro"| Created["orders.created.avro"]
+    Created --> Inv["Inventory Service"]
+    Inv -->|"One MySQL transaction"| IDB[("inventory_db: stock + processed events + result outbox")]
+    IDB -->|"Poll PENDING rows"| IP["Inventory publisher"]
+    IP -->|"JSON success"| Success["inventory.reserved"]
+    IP -->|"JSON rejection"| Reject["inventory.reservation.failed"]
+    Success --> Results["Order result consumers"]
+    Reject --> Results
+    Results -->|"Status + processed event transaction"| ODB
+    Inv -->|"Processing failure"| Retry["Retry handler"]
+    Retry -->|"Successful DLT recovery"| DLT["orders.created.avro-dlt"]
 ```
 
 ### End-to-End Business Flow
@@ -143,33 +134,17 @@ flowchart LR
 The local platform runs a **3-node Apache Kafka 4.3.1 KRaft cluster**. Each Kafka container is configured with both `broker` and `controller` roles, so the cluster does not depend on ZooKeeper.
 
 ```mermaid
-flowchart TB
-    Producer[Order / Inventory Producers]
-
-    subgraph KafkaCluster[3-Node Kafka KRaft Cluster]
-        B1[Broker 1 + Controller\nnode.id=1\nINTERNAL :19092\nEXTERNAL :9092]
-        B2[Broker 2 + Controller\nnode.id=2\nINTERNAL :19092\nEXTERNAL :9094]
-        B3[Broker 3 + Controller\nnode.id=3\nINTERNAL :19092\nEXTERNAL :9096]
+flowchart TD
+    Clients["Producers and consumers"] --> Cluster
+    Registry["Schema Registry"] --> Cluster
+    subgraph Cluster["Kafka KRaft cluster"]
+        B1["Node 1: broker + controller"]
+        B2["Node 2: broker + controller"]
+        B3["Node 3: broker + controller"]
+        B1 <-->|"Replication / quorum traffic"| B2
+        B2 <--> B3
+        B3 <--> B1
     end
-
-    Consumer[Order / Inventory Consumers]
-    Registry[Schema Registry]
-
-    Producer --> B1
-    Producer --> B2
-    Producer --> B3
-
-    B1 <--> B2
-    B2 <--> B3
-    B3 <--> B1
-
-    B1 --> Consumer
-    B2 --> Consumer
-    B3 --> Consumer
-
-    Registry --> B1
-    Registry --> B2
-    Registry --> B3
 ```
 
 ### KRaft Controller Quorum
@@ -271,13 +246,7 @@ Within that transaction the service:
    - target topic = `orders.created.avro`;
 5. commits the order and outbox row together.
 
-```mermaid
-flowchart LR
-    Request[POST /api/orders] --> Controller[OrderController]
-    Controller --> Service[OrderApplicationService\n@Transactional]
-    Service --> OrderRow[(orders)]
-    Service --> OutboxRow[(outbox_events\nORDER_CREATED · PENDING)]
-```
+The controller calls `OrderApplicationService.createOrder()`. Its transaction writes both `orders` and `outbox_events`; neither write is a separate Kafka transaction.
 
 This avoids the unsafe sequence of committing the order in MySQL and then depending on an immediate Kafka call to succeed before the event is durably recorded.
 
@@ -294,7 +263,7 @@ The response means the order and its outbox event were accepted locally. It does
 
 ### Outbox Publisher
 
-`OutboxPublisher` runs every second and reads `PENDING` rows ordered by creation time.
+`OutboxPublisher` uses a one-second fixed delay between completed scheduler runs and reads `PENDING` rows ordered by creation time.
 
 For each row it:
 
@@ -335,7 +304,7 @@ The current Order Service configuration uses:
 - Schema Registry HTTP connect/read timeout = `60000 ms`;
 - outbox publish wait = `130000 ms`.
 
-The outbox row is changed to `PUBLISHED` only after the Kafka send completes successfully. If publishing fails or the publishing thread is interrupted, the row remains `PENDING` so it can be retried by a later scheduler run.
+The publisher marks an outbox row `PUBLISHED` only after a successful Kafka send result. A send failure or interruption leaves its publication retryable. Kafka acknowledgment and the later database status update are separate operations: if Kafka accepts the record but saving `PUBLISHED` fails, redelivery can occur. Consumer idempotency handles that window.
 
 ### Why the Outbox Pattern Is Used
 
@@ -361,7 +330,7 @@ commit succeeds
     ↓
 event is durably available as PENDING
     ↓
-publisher retries until Kafka publish succeeds
+later scheduler runs retry while the application is running
 ```
 
 This does not make MySQL and Kafka one distributed transaction. Instead, it removes the direct dual-write dependency by making the database the durable source for pending publication.
@@ -381,26 +350,21 @@ This keeps Kafka progress tied to the result of business processing instead of a
 
 ```mermaid
 flowchart TD
-    Kafka[orders.created.avro] --> Listener[InventoryEventConsumer]
-    Listener --> Check{eventId already processed?}
-
-    Check -->|Yes| Duplicate[Skip inventory update]
-    Duplicate --> Ack1[Manual ACK]
-
-    Check -->|No| Tx[InventoryProcessingService\n@Transactional]
-    Tx --> Stock{Enough stock?}
-
-    Stock -->|Yes| Update[Reduce available stock]
-    Update --> Processed1[(processed_events)]
-    Processed1 --> ReservedOutbox[(outbox_events\nINVENTORY_RESERVED · PENDING)]
-    ReservedOutbox --> Commit1[Commit MySQL transaction]
-    Commit1 --> Ack2[Manual ACK]
-
-    Stock -->|No| NoStock[Keep stock unchanged]
-    NoStock --> Processed2[(processed_events)]
-    Processed2 --> FailedOutbox[(outbox_events\nINVENTORY_RESERVATION_FAILED · PENDING)]
-    FailedOutbox --> Commit2[Commit MySQL transaction]
-    Commit2 --> Ack3[Manual ACK]
+    Listener["Inventory listener"] --> Check
+    subgraph Tx["InventoryProcessingService.process: MySQL transaction"]
+        Check{"eventId already processed?"}
+        Check -->|"Yes"| Skip["Skip business update"]
+        Check -->|"No"| Load["Load inventory; save processed event"]
+        Load --> Stock{"Enough stock?"}
+        Stock -->|"Yes"| Reserve["Reduce stock; save reserved outbox"]
+        Stock -->|"No"| Reject["Keep stock; save rejection outbox"]
+        Skip --> Complete["Complete transaction"]
+        Reserve --> Complete
+        Reject --> Complete
+    end
+    Complete -->|"Successful return to listener"| Ack["Manual ACK"]
+    Tx -->|"Processing or commit exception"| Rollback["Rollback; no normal ACK"]
+    Rollback --> Handler["Error handler: retry / DLT"]
 ```
 
 ### Idempotent Consumer
@@ -544,7 +508,7 @@ Retry 2
 publish to DLT
 ```
 
-So a failing record can be processed **up to three times total**: one initial attempt plus two retries.
+For retryable listener failures, this allows **up to three processing attempts**: one initial attempt plus two retries. Error-handler exception classification can route non-retryable failures directly to recovery; the retry count is not a promise that every failure type executes the business method three times.
 
 ### DLT Routing
 
@@ -648,7 +612,7 @@ The repository contains `InventoryRetryToDltIntegrationTests`, which starts an e
 
 ## Avro, Schema Registry & Schema Evolution
 
-The `orders.created.avro` flow uses Apache Avro as the event contract between Order Service and Inventory Service. Both services keep the same `OrderCreatedEvent` schema under `src/main/avro/order-created.avsc`, and Maven generates the Java `SpecificRecord` class during the `generate-sources` phase.
+The `orders.created.avro` flow uses Apache Avro as the event contract between Order Service and Inventory Service. Both services keep the same logical `OrderCreatedEvent` schema under `src/main/avro/order-created.avsc`, and Maven generates the Java `SpecificRecord` class during the `generate-sources` phase.
 
 ### OrderCreatedEvent Contract
 
@@ -701,12 +665,11 @@ This keeps the producer and consumer strongly typed instead of passing an unstru
 Order Service converts the durable outbox payload into the generated Avro type before publishing.
 
 ```mermaid
-flowchart LR
-    Outbox[(ORDER_CREATED\nPENDING)] --> JavaEvent[OrderCreatedEvent DTO]
-    JavaEvent --> AvroRecord[Generated Avro\nOrderCreatedEvent]
-    AvroRecord --> Serializer[KafkaAvroSerializer]
-    Serializer --> Registry[Schema Registry]
-    Serializer --> Kafka[orders.created.avro]
+flowchart TD
+    Row[("Order outbox payload")] --> Map["DTO to generated Avro record"]
+    Map --> Serializer["KafkaAvroSerializer"]
+    Serializer -. "Schema registration / lookup" .-> Registry["Schema Registry"]
+    Serializer -->|"Serialized record"| Topic["orders.created.avro"]
 ```
 
 Current producer configuration:
@@ -827,31 +790,11 @@ The platform does not stop after Inventory Service updates stock. Inventory publ
 ### Result Event Flow
 
 ```mermaid
-flowchart LR
-    Pending[Order status\npending]
-
-    Inventory[Inventory Service]
-    InvOutbox[(inventory outbox\nPENDING)]
-    ReservedTopic[Kafka\ninventory.reserved]
-    FailedTopic[Kafka\ninventory.reservation.failed]
-
-    ReservedConsumer[InventoryReservedConsumer]
-    FailedConsumer[InventoryReservationFailedConsumer]
-
-    Reserved[Order status\nINVENTORY_RESERVED]
-    Rejected[Order status\nINVENTORY_REJECTED]
-
-    Pending --> Inventory
-    Inventory --> InvOutbox
-
-    InvOutbox -->|stock reserved| ReservedTopic
-    InvOutbox -->|insufficient stock| FailedTopic
-
-    ReservedTopic --> ReservedConsumer
-    FailedTopic --> FailedConsumer
-
-    ReservedConsumer --> Reserved
-    FailedConsumer --> Rejected
+stateDiagram-v2
+    [*] --> pending: Order transaction commits
+    pending --> INVENTORY_RESERVED: inventory.reserved consumed
+    pending --> INVENTORY_REJECTED: inventory.reservation.failed consumed
+    pending --> pending: Technical failure sent to DLT
 ```
 
 ### Inventory Result Events
@@ -878,7 +821,7 @@ This allows Order Service to correlate an asynchronous inventory response with t
 
 ### Inventory Outbox Publication
 
-The Inventory Outbox Publisher runs every second and reads `PENDING` result rows.
+The Inventory Outbox Publisher uses a one-second fixed delay between completed scheduler runs and reads `PENDING` result rows.
 
 ```text
 Inventory transaction
@@ -1034,25 +977,7 @@ The platform uses Spring Boot Actuator, Micrometer, Prometheus, and Grafana to m
 
 ### Monitoring Flow
 
-```mermaid
-flowchart LR
-    App[Inventory Service\n:8082]
-    Actuator[Spring Boot Actuator]
-    Micrometer[Micrometer]
-    Endpoint[/actuator/prometheus]
-    Prometheus[Prometheus\n:9090]
-    Grafana[Grafana\n:3000]
-    Alert[Grafana Alert Rule]
-    Notify[Optional Email Notification]
-
-    App --> Actuator
-    Actuator --> Micrometer
-    Micrometer --> Endpoint
-    Endpoint --> Prometheus
-    Prometheus --> Grafana
-    Grafana --> Alert
-    Alert -. SMTP enabled locally .-> Notify
-```
+Prometheus scrapes the Inventory Actuator endpoint on port 8082. Grafana queries Prometheus for dashboards and evaluates the locally configured alert rule. Email notification additionally requires explicit SMTP configuration.
 
 ### What Each Layer Does
 
@@ -1184,44 +1109,16 @@ GF_SMTP_ENABLED: "false"
 Therefore:
 
 ```text
-Grafana alert evaluation      → available in current setup
+Grafana alert evaluation      → requires the locally configured rule
 FIRING / RESOLVED state       → demonstrated
 SMTP email delivery           → opt-in, not enabled by default in committed Compose
 ```
 
 The repository's `.env.example` keeps only safe placeholder values for an optional local SMTP setup. Real SMTP credentials must never be committed.
 
-### Runtime Evidence Already in the Repository
+### Monitoring Evidence
 
-The following screenshots are already committed under `docs/screenshots/`:
-
-| Evidence | File |
-|---|---|
-| Prometheus target reachable | `prometheus-target-up.png` |
-| Grafana monitoring dashboard | `grafana-monitoring-dashboard.png` |
-| Service-down alert firing | `grafana-alert-firing.png` |
-| Service recovery / resolved state | `grafana-alert-resolved.png` |
-
-These images provide runtime proof of the monitoring path instead of relying only on configuration files.
-
-### Monitoring Scope Summary
-
-```text
-Actuator
-  exposes health + metrics
-        ↓
-Micrometer
-  instruments / formats metrics
-        ↓
-Prometheus
-  scrapes inventory-service every 5s
-        ↓
-Grafana
-  dashboard + alert evaluation
-        ↓
-Optional notification channel
-  enabled only when SMTP is explicitly configured
-```
+The four committed monitoring captures are linked and displayed in [Runtime Evidence & Screenshots](#runtime-evidence--screenshots).
 
 ## Failure Scenarios, Recovery & Production-Readiness Fixes
 
@@ -1297,7 +1194,7 @@ Kafka delivery timeout            : 120 s
 Outbox acknowledgment wait        : 130 s
 ```
 
-The 130-second application wait is intentionally longer than Kafka's 120-second delivery deadline.
+The 130-second future wait is configured longer than Kafka's 120-second delivery timeout. It starts only after `publish(...)` returns its future; synchronous serialization and Schema Registry work happen before that wait. These values do not establish a single 130-second end-to-end deadline.
 
 Additional hardening added in commit `3bf2d391`:
 
@@ -1460,47 +1357,21 @@ MySQL is **not** containerized in the committed Compose file; both services conn
 ### Container Topology
 
 ```mermaid
-flowchart TB
-    Host[Windows Host]
-
-    subgraph DockerNetwork[kafka-order-platform_default]
-        K1[kop-kafka-1\nKafka + KRaft Controller]
-        K2[kop-kafka-2\nKafka + KRaft Controller]
-        K3[kop-kafka-3\nKafka + KRaft Controller]
-        SR[kop-schema-registry]
-        P[kop-prometheus]
-        G[kop-grafana]
-        O[order-service-container]
-        I[inventory-service-container]
-
-        K1 <--> K2
-        K2 <--> K3
-        K3 <--> K1
-
-        SR --> K1
-        SR --> K2
-        SR --> K3
-
-        O --> K1
-        O --> K2
-        O --> K3
-        O --> SR
-
-        I --> K1
-        I --> K2
-        I --> K3
-        I --> SR
+flowchart TD
+    subgraph Network["kafka-order-platform_default"]
+        Apps["Order and Inventory containers"]
+        Kafka["Three Kafka brokers"]
+        Registry["Schema Registry"]
+        Prom["Prometheus"]
+        Grafana["Grafana"]
+        Apps --> Kafka
+        Apps --> Registry
+        Registry --> Kafka
+        Grafana -->|"Query"| Prom
     end
-
-    O -->|host.docker.internal| MySQL[(MySQL on Windows Host)]
-    I -->|host.docker.internal| MySQL
-    P -->|host.docker.internal:8082| I
-
-    Host -->|8080| O
-    Host -->|8082| I
-    Host -->|8081| SR
-    Host -->|9090| P
-    Host -->|3000| G
+    Apps -->|"host.docker.internal:3306"| DB[("Windows MySQL")]
+    Prom -->|"host.docker.internal:8082"| Port["Published Inventory port"]
+    Port --> Apps
 ```
 
 ### Compose Infrastructure
@@ -1551,7 +1422,7 @@ The Dockerfiles use a JRE rather than a full JDK because compilation and testing
 
 ### Docker Network
 
-Running Compose creates the default project network:
+With Compose project name `kafka-order-platform`, running Compose creates the default network:
 
 ```text
 kafka-order-platform_default
@@ -1705,56 +1576,20 @@ This lets the Jenkins runtime execute Docker commands used by the pipeline.
 
 > **Repository boundary:** the Dockerfile defines the Jenkins image, but the command/runtime configuration that launches the Jenkins container and grants it access to the Docker daemon is not source-controlled in this repository.
 
-### Docker Responsibility Boundary
-
-```text
-Docker Compose
-    → Kafka
-    → Schema Registry
-    → Prometheus
-    → Grafana
-
-Jenkins
-    → build application JARs
-    → build application images
-    → run application containers
-
-Windows host
-    → MySQL databases
-    → Docker Desktop engine
-```
-
-This separation is important when debugging: an infrastructure container being healthy does not automatically mean the application container is ready, and an application container being started does not guarantee its dependencies or business endpoints are healthy.
-
 ## CI Pipeline — Checkout, Test, Package, Archive & Docker Build
 
 The repository contains a declarative Jenkins pipeline in the root `Jenkinsfile`. The CI portion validates both Spring Boot services before any deployment approval or runtime replacement happens.
 
 ### CI Flow
 
-```mermaid
-flowchart LR
-    GitHub[GitHub main branch]
-    Checkout[Checkout]
-    TestOrder[Test Order Service]
-    PackageOrder[Package Order Service]
-    ArchiveOrder[Archive Order JAR]
-    TestInventory[Test Inventory Service]
-    PackageInventory[Package Inventory Service]
-    ArchiveInventory[Archive Inventory JAR]
-    BuildOrder[Build Order Docker Image]
-    BuildInventory[Build Inventory Docker Image]
+| Order | Pipeline stage |
+|---|---|
+| 1 | Checkout `main` |
+| 2–4 | Test Order, package Order, archive Order JAR |
+| 5–7 | Test Inventory, package Inventory, archive Inventory JAR |
+| 8–9 | Build Order image, then Inventory image |
 
-    GitHub --> Checkout
-    Checkout --> TestOrder
-    TestOrder --> PackageOrder
-    PackageOrder --> ArchiveOrder
-    ArchiveOrder --> TestInventory
-    TestInventory --> PackageInventory
-    PackageInventory --> ArchiveInventory
-    ArchiveInventory --> BuildOrder
-    BuildOrder --> BuildInventory
-```
+The service stages run sequentially. If a test stage fails, subsequent package/image stages do not run.
 
 The later Docker Hub, approval, deployment, and health-check stages belong to the delivery/deployment part of the pipeline and are documented separately.
 
@@ -1902,24 +1737,6 @@ inventory-service:28
 
 instead of repeatedly overwriting only a generic local tag.
 
-### Build Order Matters
-
-The current CI sequence intentionally validates source code before creating deployable images:
-
-```text
-Checkout
-   ↓
-Tests
-   ↓
-Package
-   ↓
-Archive
-   ↓
-Docker build
-```
-
-A failed test therefore prevents the pipeline from producing a new candidate application image in the normal flow.
-
 ### Maven Wrapper
 
 The pipeline uses the repository Maven Wrapper:
@@ -1967,55 +1784,13 @@ Add Docker image build stages
 
 This progression matters because the pipeline was adapted to the real execution environment instead of assuming that local `localhost` settings would also work from inside the Jenkins container.
 
-### CI Responsibility Boundary
-
-```text
-CI validates and packages:
-    checkout
-    tests
-    JARs
-    archived artifacts
-    Docker images
-
-Delivery / deployment handles:
-    registry login
-    image push
-    manual approval
-    local deployment
-    health verification
-```
-
-Keeping these responsibilities conceptually separate makes pipeline failures easier to diagnose: a unit/integration-test failure is a CI problem, while a deployment-readiness failure belongs to the later delivery stage.
-
 ## Docker Hub Registry, Credentials & Image Versioning
 
 After Jenkins builds both application images, the pipeline authenticates to Docker Hub and publishes versioned images to two separate repositories.
 
 ### Registry Flow
 
-```mermaid
-flowchart LR
-    Build[Successful Jenkins Build]
-    LocalOrder[order-service:BUILD_NUMBER]
-    LocalInventory[inventory-service:BUILD_NUMBER]
-    Login[Docker Hub Login\nJenkins Credentials]
-    TagOrder[Tag for Docker Hub]
-    TagInventory[Tag for Docker Hub]
-    HubOrder[saifee162007/order-service:BUILD_NUMBER]
-    HubInventory[saifee162007/inventory-service:BUILD_NUMBER]
-
-    Build --> LocalOrder
-    Build --> LocalInventory
-
-    LocalOrder --> Login
-    LocalInventory --> Login
-
-    Login --> TagOrder
-    Login --> TagInventory
-
-    TagOrder --> HubOrder
-    TagInventory --> HubInventory
-```
+After both local images have been built, Jenkins logs in to Docker Hub, tags and pushes the Order image, then tags and pushes the Inventory image. Both tags use the same `BUILD_NUMBER`.
 
 ### Docker Hub Repositories
 
@@ -2164,38 +1939,7 @@ The current tag does not embed the Git SHA, but the Jenkins build record can sti
 
 ### Registry Push vs Deployment
 
-The current Jenkinsfile performs both operations, but they are separate concepts:
-
-```text
-Build image
-    ↓
-Tag image
-    ↓
-Push image to Docker Hub
-    ↓
-Manual deployment approval
-    ↓
-Run application container
-```
-
-An important current implementation detail is that the local deployment stages run:
-
-```text
-order-service:${BUILD_NUMBER}
-inventory-service:${BUILD_NUMBER}
-```
-
-which are the images already built in the same Jenkins/Docker environment.
-
-The deployment stage does **not** currently pull the just-pushed image back from Docker Hub.
-
-Therefore Docker Hub currently provides:
-
-- remote image publication;
-- build-version storage;
-- proof that the image can be distributed through a registry;
-
-while the local deployment uses the already-built local image.
+Docker Hub stores the published build-number tags. The current deployment uses `order-service:${BUILD_NUMBER}` and `inventory-service:${BUILD_NUMBER}` already present in the same Docker daemon; it does not pull them back from Docker Hub. See [Continuous Delivery](#continuous-delivery--approval-deployment--health-verification) for deployment behavior and limitations.
 
 ### Credential and Secret Rules
 
@@ -2208,32 +1952,6 @@ The project follows these rules for registry authentication:
 - never place a real token in `Jenkinsfile`, `.env.example`, README, screenshots, or Git history;
 - rotate/revoke a token if it is ever exposed.
 
-### Registry Stage History
-
-Docker Hub publishing was added after the application image-build stages. Repository history records this as:
-
-```text
-Add Dockerfiles for microservices
-        ↓
-Add Docker image build stages
-        ↓
-Add Docker Hub image publishing
-```
-
-This reflects the normal artifact progression:
-
-```text
-source
-  ↓
-JAR
-  ↓
-local Docker image
-  ↓
-registry-qualified tag
-  ↓
-Docker Hub image
-```
-
 ## Continuous Delivery — Approval, Deployment & Health Verification
 
 After CI has tested, packaged, archived, built, and published the application images, the Jenkins pipeline enters the delivery/deployment phase.
@@ -2243,27 +1961,18 @@ The current pipeline uses a **manual approval gate** before replacing the runnin
 ### Delivery Flow
 
 ```mermaid
-flowchart LR
-    Images[Versioned Docker Images]
-    Push[Docker Hub Push]
-    Approval{Manual Deploy Approval}
-    DeployOrder[Replace Order Service Container]
-    DeployInventory[Replace Inventory Service Container]
-    HealthOrder[Order /actuator/health]
-    HealthInventory[Inventory /actuator/health]
-    Success[Deployment Verified]
-    Fail[Pipeline Failed]
-
-    Images --> Push
-    Push --> Approval
-    Approval -->|Approve| DeployOrder
-    Approval -->|Do not approve| Fail
-    DeployOrder --> DeployInventory
-    DeployInventory --> HealthOrder
-    HealthOrder -->|UP| HealthInventory
-    HealthOrder -->|not UP after retries| Fail
-    HealthInventory -->|UP| Success
-    HealthInventory -->|not UP after retries| Fail
+flowchart TD
+    Push["Both images pushed"] --> Approval{"Deployment approval"}
+    Approval -->|"Still waiting"| Wait["Paused; current containers unchanged"]
+    Wait --> Approval
+    Approval -->|"Abort"| Abort["Build aborted"]
+    Approval -->|"Approve"| Order["Replace Order container"]
+    Order --> Inventory["Replace Inventory container"]
+    Inventory --> OrderHealth{"Order health check passes?"}
+    OrderHealth -->|"Yes"| InventoryHealth{"Inventory health check passes?"}
+    OrderHealth -->|"Retries exhausted"| Fail["Build fails; no automatic rollback"]
+    InventoryHealth -->|"Retries exhausted"| Fail
+    InventoryHealth -->|"Yes"| Success["Deployment health verified"]
 ```
 
 ### 1. Manual Approval Gate
@@ -2401,43 +2110,11 @@ Current retry behavior:
 | success condition | Actuator response contains `"status":"UP"` |
 | final failure | Jenkins exits with status `1` |
 
-This provides roughly a 90-second retry window per service, depending on request duration.
+There are up to 29 three-second sleeps between 30 attempts. Request duration is additional: the current curl command has no explicit per-request deadline, so this is not a strict 90-second wall-clock limit.
 
-### Why the Health Check Was Changed
+### Health-Check Fix
 
-The deployment health check evolved through several repository commits:
-
-```text
-Add deployment health checks
-        ↓
-Increase retry count
-        ↓
-Increase retry delay
-        ↓
-Fix deployment health-check retry logic
-```
-
-The original approach placed `curl --retry` before a separate `grep`. That could retry connection failures without reliably retrying the entire application-readiness decision.
-
-The final implementation wraps both operations inside the loop:
-
-```bash
-if curl .../actuator/health | grep -q '"status":"UP"'; then
-    # ready
-fi
-```
-
-So the lesson is:
-
-```text
-Container started
-      ≠
-TCP endpoint reachable
-      ≠
-Spring Boot application healthy
-```
-
-The pipeline only accepts the last condition.
+The earlier retry bug and its correction are documented in [Failure Scenarios](#failure-scenarios-recovery--production-readiness-fixes). The current loop retries both the HTTP request and the `UP` response check together.
 
 ### Deployment Version Relationship
 
@@ -2458,7 +2135,7 @@ This makes the deployed local application version directly traceable to the Jenk
 
 ### Current Deployment Boundaries
 
-The current workflow intentionally remains a local learning/engineering deployment rather than a production orchestrator.
+The current workflow is a local production-style deployment demonstration.
 
 Important boundaries are documented explicitly:
 
@@ -2472,60 +2149,19 @@ Important boundaries are documented explicitly:
 
 Therefore the current pipeline demonstrates the **build → approval → deploy → verify** lifecycle without claiming zero-downtime deployment or automated rollback.
 
-### Delivery Responsibility Summary
-
-```text
-CI
-    Checkout
-    Test
-    Package
-    Archive
-    Build image
-        ↓
-Registry
-    Tag
-    Login
-    Push
-        ↓
-Continuous Delivery
-    Manual approval
-        ↓
-Deployment
-    Replace Order container
-    Replace Inventory container
-        ↓
-Verification
-    Order health UP
-    Inventory health UP
-        ↓
-Deployment accepted
-```
-
-This separation makes it clear where a failure happened: source validation, artifact creation, registry publication, deployment execution, or runtime readiness.
-
 ## GitHub Webhook, ngrok & Automatic Jenkins Trigger
 
 The local Jenkins server runs behind the developer machine, so GitHub cannot call `localhost` directly. During webhook testing, ngrok was used to create a temporary public HTTPS route to the local Jenkins endpoint.
 
 ### Trigger Flow
 
-```mermaid
-flowchart LR
-    Dev[Developer Push]
-    GitHub[GitHub Repository]
-    Webhook[GitHub Webhook]
-    Ngrok[ngrok Public HTTPS URL]
-    Jenkins[Jenkins\nlocalhost:8085]
-    Job[kafka-order-platform-pipeline]
-    Pipeline[Jenkinsfile Pipeline]
-
-    Dev --> GitHub
-    GitHub --> Webhook
-    Webhook --> Ngrok
-    Ngrok --> Jenkins
-    Jenkins --> Job
-    Job --> Pipeline
-```
+| Step | Trigger path |
+|---|---|
+| 1 | Developer pushes a commit to GitHub |
+| 2 | GitHub sends a push webhook to the ngrok HTTPS address |
+| 3 | ngrok forwards it to local Jenkins on port 8085 |
+| 4 | The configured Jenkins job checks SCM and starts the pipeline |
+| 5 | Jenkins checks out `main` and executes `Jenkinsfile` |
 
 The important idea is:
 
@@ -2535,59 +2171,13 @@ ngrok   = public route to local Jenkins
 Jenkins = receives event and starts the configured job
 ```
 
-### Why ngrok Was Needed
+### Local Jenkins Address
 
-The Jenkins UI is local:
-
-```text
-http://localhost:8085
-```
-
-That address only exists from the local machine's point of view. GitHub's servers cannot send a webhook to another computer's `localhost`.
-
-The local setup therefore used:
-
-```text
-GitHub
-   ↓ HTTPS
-temporary ngrok public URL
-   ↓
-local Jenkins :8085
-```
-
-with the Jenkins GitHub webhook endpoint ending in:
-
-```text
-/github-webhook/
-```
-
-The exact ngrok hostname is intentionally not documented because temporary tunnel addresses can change between sessions.
+The local Jenkins UI is `http://localhost:8085`; the webhook endpoint is `/github-webhook/`. GitHub cannot reach another machine's localhost, so the demonstrated setup uses ngrok's public HTTPS forwarding address. That temporary hostname is runtime configuration and may change between sessions.
 
 ### Jenkins Trigger Configuration
 
-The Jenkins job used the GitHub hook trigger for SCM polling so a valid GitHub webhook notification could start the pipeline automatically.
-
-The resulting workflow was:
-
-```text
-git push
-   ↓
-GitHub receives new commit
-   ↓
-GitHub sends webhook event
-   ↓
-ngrok forwards request
-   ↓
-Jenkins GitHub webhook endpoint
-   ↓
-configured pipeline job starts
-   ↓
-Jenkins checks out main
-   ↓
-Jenkinsfile executes
-```
-
-A webhook does **not** contain or execute the whole Jenkins pipeline itself. It is the notification that tells Jenkins that the repository changed; Jenkins then performs its own checkout and runs the pipeline.
+The local job uses **GitHub hook trigger for SCM polling**. The webhook notifies Jenkins of a repository change; Jenkins performs the SCM check and executes the configured job. It does not execute pipeline code from the webhook payload.
 
 ### Verification Performed
 
@@ -2607,23 +2197,11 @@ During verification:
 - Jenkins received the callback;
 - the pipeline started automatically from the GitHub event.
 
-This proves the trigger path independently from application-code changes.
+These are recorded observations from the earlier local verification, not a fresh webhook test performed during this documentation review.
 
-### Why an Empty Commit Was Useful
+### Empty Commits and Redelivery
 
-An empty commit changes Git history without changing a file:
-
-```text
-no source-code change
-        +
-new Git commit
-        ↓
-push event still occurs
-        ↓
-webhook can be tested safely
-```
-
-That separates webhook troubleshooting from Java, Kafka, Docker, or Jenkinsfile changes.
+An empty commit creates a push event without changing application files. GitHub webhook redelivery sends an existing event again. Both were used to isolate trigger troubleshooting from Java, Kafka, and Docker changes.
 
 ### Webhook vs Polling
 
@@ -2640,18 +2218,6 @@ Jenkins triggered
 rather than depending on Jenkins repeatedly asking GitHub whether something changed.
 
 This reduces unnecessary polling and makes the CI trigger more immediate.
-
-### Webhook Redelivery
-
-GitHub's webhook delivery history allows an existing event to be sent again.
-
-```text
-Redeliver
-    =
-send the same webhook event again
-```
-
-This was useful when validating the Jenkins endpoint because the same GitHub event could be retried after fixing the local tunnel or Jenkins-side configuration, without creating another code change.
 
 ### Security Boundary
 
@@ -2678,33 +2244,7 @@ The following pieces are **not** represented as repository files in the current 
 
 Those are runtime/UI configuration, while the root `Jenkinsfile` remains the source-controlled pipeline definition.
 
-Therefore the repository proves webhook testing through the dedicated commits and pipeline history, but it does not claim that cloning the repository alone recreates the ngrok/Jenkins webhook configuration automatically.
-
-### Trigger Responsibility Summary
-
-```text
-Git
-  creates commit
-
-GitHub
-  hosts repository
-  emits push event
-
-Webhook
-  sends notification
-
-ngrok
-  forwards public request to local machine
-
-Jenkins
-  receives notification
-  starts configured job
-
-Jenkinsfile
-  defines what the job executes
-```
-
-This separation is useful during troubleshooting because a successful Git push, successful webhook delivery, successful Jenkins trigger, and successful pipeline execution are four different checkpoints.
+The empty commits identify trigger-test attempts. Successful delivery and Jenkins execution are reported runtime observations, not facts established by those commits alone. Cloning the repository does not recreate the ngrok/Jenkins webhook configuration.
 
 ## Secrets, Credentials & Configuration Management
 
@@ -2712,19 +2252,15 @@ The project uses a mix of source-controlled configuration, runtime environment o
 
 ### Configuration Layers
 
-```mermaid
-flowchart TD
-    Repo[Source-controlled config]
-    Env[Runtime environment variables]
-    JenkinsCreds[Jenkins Credentials Store]
-    LocalEnv[Local .env / local override files]
-    App[Spring Boot / Docker / Jenkins runtime]
+| Configuration source | How it reaches the runtime |
+|---|---|
+| Tracked Spring properties | Loaded by the Spring Boot application |
+| Environment overrides | Passed to the process or application container |
+| Jenkins Credentials | Bound by `withCredentials` where the Jenkinsfile explicitly requests them |
+| Local Spring overrides | Loaded when the corresponding local profile is activated |
+| Local `.env` | Available to Compose interpolation; not automatically loaded by Spring Boot |
 
-    Repo --> App
-    Env --> App
-    JenkinsCreds --> App
-    LocalEnv --> App
-```
+The current Compose file disables SMTP and does not wire the optional SMTP placeholders into Grafana.
 
 The intended rule is:
 
@@ -2788,34 +2324,7 @@ when running inside Docker.
 
 ### Docker Hub Credential
 
-The Docker Hub token is not stored in the Jenkinsfile.
-
-The pipeline references only:
-
-```text
-credentialsId = dockerhub-credentials
-```
-
-Jenkins temporarily binds that credential as:
-
-```text
-DOCKERHUB_USERNAME
-DOCKERHUB_TOKEN
-```
-
-inside the login stage.
-
-```text
-Jenkinsfile
-    ↓ credential ID only
-Jenkins Credentials Store
-    ↓ actual secret
-withCredentials(...)
-    ↓ temporary runtime variables
-docker login --password-stdin
-```
-
-This is the preferred pattern already implemented for Docker Hub authentication.
+The pipeline binds credential ID `dockerhub-credentials` only in the login stage. See [Jenkins Credential Handling](#jenkins-credential-handling) for the implemented `withCredentials` and `--password-stdin` flow.
 
 ### Grafana SMTP Credentials
 
@@ -2955,23 +2464,9 @@ The goal is to test the failure boundaries that matter most in this event-driven
 
 ### Test Coverage Overview
 
-```mermaid
-flowchart TD
-    Unit[Focused Unit Tests]
-    Spring[Spring Context Tests]
-    DB[MySQL Integration Test]
-    Kafka[Embedded Kafka + DLT Integration]
-    CI[Jenkins Test Stages]
-    E2E[Manual End-to-End Verification]
+The test classes below run through Maven in Jenkins test stages. Manual end-to-end checks are separate operator-run verification, not an automated Jenkins stage.
 
-    Unit --> CI
-    Spring --> CI
-    DB --> CI
-    Kafka --> CI
-    CI --> E2E
-```
-
-The current repository contains **13 JUnit test methods** across the two services.
+The current repository contains **13 JUnit test methods** across the two services. This count is verified from source; it is not a claim that the tests were rerun during the documentation review.
 
 | Test class | Type | Main behavior verified |
 |---|---|---|
@@ -3133,39 +2628,7 @@ They are useful smoke tests, but they are not treated as substitutes for busines
 
 ### Jenkins Test Gates
 
-Jenkins executes tests before package and Docker-image creation.
-
-Order Service:
-
-```bash
-./mvnw test -Dspring.datasource.url=jdbc:mysql://host.docker.internal:3306/order_db
-```
-
-Inventory Service:
-
-```bash
-TEST_DB_URL=jdbc:mysql://host.docker.internal:3306/inventory_test_db \
-TEST_SCHEMA_REGISTRY_URL=http://host.docker.internal:8081 \
-./mvnw test
-```
-
-Pipeline behavior:
-
-```text
-test failure
-    ↓
-pipeline stops
-    ↓
-normal package/image progression does not continue
-
-test success
-    ↓
-package
-    ↓
-archive
-    ↓
-Docker build
-```
+The exact commands and external dependencies are maintained in [CI Pipeline](#ci-pipeline--checkout-test-package-archive--docker-build). Jenkins runs each service's tests before packaging it and builds both Docker images only after the test/package stages succeed.
 
 ### Manual End-to-End Verification
 
@@ -3201,30 +2664,6 @@ Notable gaps include:
 - GitHub webhook/ngrok integration.
 
 These are future hardening opportunities, not features claimed as already covered.
-
-### Verification Strategy Summary
-
-```text
-Unit tests
-    → business branches + outbox state transitions
-
-Spring context tests
-    → service wiring/startup
-
-MySQL integration
-    → real persistence behavior
-
-Embedded Kafka integration
-    → Retry → DLT + metadata + Avro payload
-
-Jenkins
-    → executes test gates before build
-
-Manual E2E
-    → validates complete local runtime flow
-```
-
-This gives the project multiple verification layers while keeping automated proof and manual runtime evidence clearly separated.
 
 ## Runtime Evidence & Screenshots
 
@@ -3685,4 +3124,3 @@ docker compose stop
 Use the same Compose project name used during startup if it was explicitly overridden. These stop commands retain the existing named volumes. Do not use `down -v` for a normal shutdown; it removes the Compose-managed named volumes.
 
 Close the credential-bearing PowerShell terminals after use. MySQL and Jenkins are managed separately from this Compose stack.
-
