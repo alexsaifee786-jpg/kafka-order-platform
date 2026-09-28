@@ -2503,6 +2503,209 @@ Deployment accepted
 
 This separation makes it clear where a failure happened: source validation, artifact creation, registry publication, deployment execution, or runtime readiness.
 
+## GitHub Webhook, ngrok & Automatic Jenkins Trigger
+
+The local Jenkins server runs behind the developer machine, so GitHub cannot call `localhost` directly. During webhook testing, ngrok was used to create a temporary public HTTPS route to the local Jenkins endpoint.
+
+### Trigger Flow
+
+```mermaid
+flowchart LR
+    Dev[Developer Push]
+    GitHub[GitHub Repository]
+    Webhook[GitHub Webhook]
+    Ngrok[ngrok Public HTTPS URL]
+    Jenkins[Jenkins\nlocalhost:8085]
+    Job[kafka-order-platform-pipeline]
+    Pipeline[Jenkinsfile Pipeline]
+
+    Dev --> GitHub
+    GitHub --> Webhook
+    Webhook --> Ngrok
+    Ngrok --> Jenkins
+    Jenkins --> Job
+    Job --> Pipeline
+```
+
+The important idea is:
+
+```text
+Webhook = event notification
+ngrok   = public route to local Jenkins
+Jenkins = receives event and starts the configured job
+```
+
+### Why ngrok Was Needed
+
+The Jenkins UI is local:
+
+```text
+http://localhost:8085
+```
+
+That address only exists from the local machine's point of view. GitHub's servers cannot send a webhook to another computer's `localhost`.
+
+The local setup therefore used:
+
+```text
+GitHub
+   ↓ HTTPS
+temporary ngrok public URL
+   ↓
+local Jenkins :8085
+```
+
+with the Jenkins GitHub webhook endpoint ending in:
+
+```text
+/github-webhook/
+```
+
+The exact ngrok hostname is intentionally not documented because temporary tunnel addresses can change between sessions.
+
+### Jenkins Trigger Configuration
+
+The Jenkins job used the GitHub hook trigger for SCM polling so a valid GitHub webhook notification could start the pipeline automatically.
+
+The resulting workflow was:
+
+```text
+git push
+   ↓
+GitHub receives new commit
+   ↓
+GitHub sends webhook event
+   ↓
+ngrok forwards request
+   ↓
+Jenkins GitHub webhook endpoint
+   ↓
+configured pipeline job starts
+   ↓
+Jenkins checks out main
+   ↓
+Jenkinsfile executes
+```
+
+A webhook does **not** contain or execute the whole Jenkins pipeline itself. It is the notification that tells Jenkins that the repository changed; Jenkins then performs its own checkout and runs the pipeline.
+
+### Verification Performed
+
+Webhook behavior was tested with dedicated empty commits:
+
+```text
+13e0a345  Test Jenkins webhook
+de9f5e97  Verify Jenkins webhook
+```
+
+Both commits contain no source-file changes. Their purpose was to create a real Git push event without modifying application code.
+
+During verification:
+
+- GitHub webhook delivery was re-sent/tested;
+- GitHub reported a successful HTTP response from the webhook endpoint;
+- Jenkins received the callback;
+- the pipeline started automatically from the GitHub event.
+
+This proves the trigger path independently from application-code changes.
+
+### Why an Empty Commit Was Useful
+
+An empty commit changes Git history without changing a file:
+
+```text
+no source-code change
+        +
+new Git commit
+        ↓
+push event still occurs
+        ↓
+webhook can be tested safely
+```
+
+That separates webhook troubleshooting from Java, Kafka, Docker, or Jenkinsfile changes.
+
+### Webhook vs Polling
+
+The implemented local workflow uses event-driven notification:
+
+```text
+GitHub push
+    ↓
+webhook sent immediately
+    ↓
+Jenkins triggered
+```
+
+rather than depending on Jenkins repeatedly asking GitHub whether something changed.
+
+This reduces unnecessary polling and makes the CI trigger more immediate.
+
+### Webhook Redelivery
+
+GitHub's webhook delivery history allows an existing event to be sent again.
+
+```text
+Redeliver
+    =
+send the same webhook event again
+```
+
+This was useful when validating the Jenkins endpoint because the same GitHub event could be retried after fixing the local tunnel or Jenkins-side configuration, without creating another code change.
+
+### Security Boundary
+
+The webhook route makes a local Jenkins endpoint reachable through a public tunnel, so the tunnel and Jenkins instance must be treated carefully.
+
+The project documentation intentionally does **not** publish:
+
+- ngrok authentication tokens;
+- Jenkins passwords;
+- Docker Hub tokens;
+- webhook secrets, if configured;
+- temporary private tunnel-management information.
+
+If an ngrok authentication token or another credential is ever exposed in a screenshot or terminal capture, it should be revoked/rotated instead of being reused.
+
+### Source-Control Boundary
+
+The following pieces are **not** represented as repository files in the current project:
+
+- the active ngrok tunnel process;
+- the temporary ngrok public hostname;
+- Jenkins UI checkbox/configuration for the GitHub hook trigger;
+- GitHub repository webhook settings and delivery history.
+
+Those are runtime/UI configuration, while the root `Jenkinsfile` remains the source-controlled pipeline definition.
+
+Therefore the repository proves webhook testing through the dedicated commits and pipeline history, but it does not claim that cloning the repository alone recreates the ngrok/Jenkins webhook configuration automatically.
+
+### Trigger Responsibility Summary
+
+```text
+Git
+  creates commit
+
+GitHub
+  hosts repository
+  emits push event
+
+Webhook
+  sends notification
+
+ngrok
+  forwards public request to local machine
+
+Jenkins
+  receives notification
+  starts configured job
+
+Jenkinsfile
+  defines what the job executes
+```
+
+This separation is useful during troubleshooting because a successful Git push, successful webhook delivery, successful Jenkins trigger, and successful pipeline execution are four different checkpoints.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
