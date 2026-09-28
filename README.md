@@ -62,39 +62,80 @@ kafka-order-platform/
 ├── docker-compose.yml    # Kafka, Schema Registry, Prometheus and Grafana
 ├── .env.example          # Environment variable template
 └── README.md
-## Architecture
+```
+
+## Final Runtime Architecture
+
+The runtime flow uses the Transactional Outbox pattern on both business sides so database changes and outgoing events are not treated as one unsafe dual-write operation.
+
 ```mermaid
 flowchart LR
     Client[Client / Postman]
-    Order[Order Service]
-    Kafka[Kafka - orders.created]
-    Inventory[Inventory Service]
-    DB[(MySQL)]
+    OrderService[Order Service]
+    OrderDB[(order_db)]
+    OrderOutbox[Order Outbox\nPENDING → PUBLISHED]
     Schema[Schema Registry]
-    Retry[Retry]
-    DLT[Dead Letter Topic]
+    KafkaOrder[Kafka\norders.created.avro]
+    InventoryService[Inventory Service]
+    InventoryDB[(inventory_db)]
+    InventoryOutbox[Inventory Outbox\nPENDING → PUBLISHED]
+    Reserved[Kafka\ninventory.reserved]
+    Rejected[Kafka\ninventory.reservation.failed]
+    Retry[Retry\n2 retries · 2s backoff]
+    DLT[DLT\norders.created.avro-dlt]
 
     Actuator[Actuator + Micrometer]
     Prometheus[Prometheus]
     Grafana[Grafana]
-    Email[Email Alert]
 
-    Client --> Order
-    Order -->|Avro Event| Kafka
-    Order --> Schema
+    Client -->|POST /api/orders| OrderService
+    OrderService -->|same MySQL transaction| OrderDB
+    OrderService -->|write ORDER_CREATED event| OrderOutbox
+    OrderOutbox -->|Avro serialize| Schema
+    OrderOutbox -->|publish after polling| KafkaOrder
 
-    Kafka --> Inventory
-    Inventory --> Schema
-    Inventory -->|DB Transaction| DB
+    KafkaOrder --> InventoryService
+    InventoryService -->|idempotency + stock processing| InventoryDB
+    InventoryService -->|write result event| InventoryOutbox
 
-    Inventory -->|Processing Failure| Retry
-    Retry -->|Still Fails| DLT
+    InventoryOutbox -->|reservation success| Reserved
+    InventoryOutbox -->|insufficient stock| Rejected
 
-    Inventory --> Actuator
+    Reserved -->|update order status| OrderService
+    Rejected -->|update order status| OrderService
+
+    InventoryService -->|processing exception| Retry
+    Retry -->|retries exhausted| DLT
+
+    InventoryService --> Actuator
     Actuator --> Prometheus
     Prometheus --> Grafana
-    Grafana --> Email
 ```
+
+### End-to-End Business Flow
+
+1. The client sends `POST /api/orders` to `order-service`.
+2. `order-service` stores the order and an `ORDER_CREATED` outbox row in MySQL within the same transaction.
+3. The Order Outbox Publisher reads `PENDING` rows, converts the event to Avro, uses Schema Registry, and publishes to `orders.created.avro`.
+4. After Kafka acknowledges the send, the outbox row is marked `PUBLISHED`; failed sends remain eligible for retry.
+5. `inventory-service` consumes the Avro event, checks `eventId` for duplicate processing, and performs inventory work inside its MySQL transaction.
+6. The inventory transaction also creates an outgoing result event in its outbox:
+   - `inventory.reserved` when stock is reserved.
+   - `inventory.reservation.failed` when stock is insufficient.
+7. The Inventory Outbox Publisher publishes the result event to Kafka.
+8. `order-service` consumes the result and updates the order to `INVENTORY_RESERVED` or `INVENTORY_REJECTED`.
+9. Source-event processing uses manual acknowledgment; processing exceptions follow the configured retry policy and are recovered to `orders.created.avro-dlt` after retries are exhausted.
+10. Actuator and Micrometer expose runtime metrics that Prometheus scrapes and Grafana visualizes.
+
+### Reliability Boundaries
+
+- **Order creation + order outbox:** one local MySQL transaction.
+- **Inventory update + processed-event tracking + inventory outbox:** one local MySQL transaction.
+- **Kafka delivery:** at-least-once, so consumers use `eventId`-based idempotency.
+- **Kafka offset acknowledgment:** performed only after successful listener processing.
+- **Outbox publication:** a row becomes `PUBLISHED` only after the Kafka send completes successfully.
+- **Failure isolation:** bounded retries are followed by DLT recovery instead of infinite retry.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
