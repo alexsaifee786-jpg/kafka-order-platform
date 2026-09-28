@@ -1221,6 +1221,231 @@ Optional notification channel
   enabled only when SMTP is explicitly configured
 ```
 
+## Failure Scenarios, Recovery & Production-Readiness Fixes
+
+This project was hardened by deliberately testing failure windows and by fixing issues discovered during local end-to-end runs and CI/CD work. The goal is not to claim a full production environment; it is to show production-style failure handling with observable recovery behavior.
+
+### Failure Matrix
+
+| Failure scenario | Risk | Protection / fix |
+|---|---|---|
+| consumer crashes after DB commit but before Kafka offset commit | duplicate stock update on redelivery | `eventId` idempotency + unique `processed_events.event_id` |
+| Order outbox publish stalls or fails | event row can be marked published incorrectly or scheduler can wait indefinitely | bounded wait, correlated logs, interruption handling, keep row `PENDING` on failure |
+| Schema Registry is slow/unavailable | Avro serialization can block before Kafka send future is returned | explicit Registry HTTP limits + outbox timeout sized beyond Kafka delivery timeout |
+| poison event keeps failing | consumer can repeatedly hit the same bad record | 2 retries with 2-second backoff, then DLT recovery |
+| Docker/Kafka local resource pressure | brokers/Registry may start slowly or fail health checks | operational recovery + bounded health checks; no claim of unlimited local capacity |
+| deployment container starts before app is ready | pipeline can treat container start as successful application readiness | retry the complete Actuator health predicate |
+| insufficient stock | business rejection could be confused with a technical error | publish `INVENTORY_RESERVATION_FAILED`, do not send it to DLT |
+
+### 1. Duplicate After Database Commit but Before Offset Commit
+
+The important at-least-once delivery window is:
+
+```text
+Kafka delivers event
+    ↓
+Inventory MySQL transaction commits
+    ↓
+process crashes before Kafka offset commit
+    ↓
+same Kafka record is delivered again
+```
+
+Without idempotency, the second delivery could reduce stock twice.
+
+The implemented protection is:
+
+```text
+eventId
+  ↓
+processed_events.event_id UNIQUE
+  ↓
+already processed?
+  ├─ yes → skip business update → ACK
+  └─ no  → process transaction → save marker → ACK
+```
+
+This design was verified with duplicate-processing tests and end-to-end duplicate scenarios: the redelivered event is recognized while the business effect is not applied a second time.
+
+### 2. Outbox Publish Stall & Schema Registry Delay
+
+During an earlier local debugging run, an apparent Order Outbox publishing "hang" was traced to synchronous Avro schema work:
+
+```text
+OutboxPublisher
+    ↓
+OrderEventProducer.publish(...)
+    ↓
+KafkaAvroSerializer
+    ↓
+Schema Registry registerSchema
+    ↓
+HTTP response wait
+    ↓
+only then can kafkaTemplate.send(...) return its future
+```
+
+One observed schema-registration request took about **26.9 seconds**. A temporary 10-second Registry HTTP limit proved too aggressive during cold startup, so the final source configuration was restored to 60-second Registry HTTP connect/read limits.
+
+The hardened Order publisher now uses:
+
+```text
+Schema Registry HTTP connect/read : 60 s
+Kafka delivery timeout            : 120 s
+Outbox acknowledgment wait        : 130 s
+```
+
+The 130-second application wait is intentionally longer than Kafka's 120-second delivery deadline.
+
+Additional hardening added in commit `3bf2d391`:
+
+- log the publish attempt with `eventId`, topic, and `orderId`;
+- wait with an explicit timeout instead of unbounded `.get()`;
+- preserve the Java thread interruption flag;
+- stop the current batch after interruption;
+- leave the outbox row `PENDING` on timeout, serialization error, broker failure, or interruption;
+- mark `PUBLISHED` only after a successful Kafka send result.
+
+The repository also contains `OutboxPublisherTest` cases covering successful ACK, timeout/retry, asynchronous broker failure, synchronous serialization failure, interruption, and empty polls.
+
+A later end-to-end verification completed with the outbox row published, Inventory processing completed, the order reaching `INVENTORY_RESERVED`, and no pending Order outbox rows left from that verification run.
+
+### 3. Poison Event → Retry → DLT
+
+A technical failure is allowed to fail the listener instead of being manually acknowledged.
+
+Current policy:
+
+```text
+attempt 1
+  ↓ fail
+2-second wait
+  ↓
+attempt 2
+  ↓ fail
+2-second wait
+  ↓
+attempt 3
+  ↓ fail
+orders.created.avro-dlt
+```
+
+The embedded-Kafka integration test deliberately sends an event for a missing inventory product and verifies:
+
+- the event reaches `orders.created.avro-dlt`;
+- the key and Avro payload are preserved;
+- the original-topic header is present;
+- the exception class and message are present.
+
+After successful DLT recovery, `setCommitRecovered(true)` lets the consumer move past that poison record instead of retrying it forever.
+
+### 4. Business Failure Is Not a Technical Failure
+
+Insufficient stock is a valid business outcome:
+
+```text
+inventory exists
+    +
+requested quantity > available stock
+    ↓
+INVENTORY_RESERVATION_FAILED
+    ↓
+inventory.reservation.failed
+    ↓
+Order → INVENTORY_REJECTED
+```
+
+It is committed and acknowledged normally.
+
+By contrast:
+
+```text
+missing inventory row / unexpected exception
+    ↓
+retry
+    ↓
+DLT if still failing
+```
+
+Keeping these paths separate prevents expected business rejection from polluting the technical-error channel.
+
+### 5. Local Docker / Kafka Resource-Pressure Incident
+
+During a heavy local run, Docker Desktop and the 3-node KRaft stack showed resource pressure together with intermittent broker/startup failures and slow infrastructure recovery.
+
+The environment was an **8 GB development laptop**, so this observation is treated as an operational constraint, not proof of a Kafka design defect.
+
+Recovery work included reducing concurrent local load, stopping nonessential monitoring containers temporarily, restarting the Kafka brokers, and then starting Schema Registry after broker health recovered.
+
+The lesson recorded from this incident is:
+
+```text
+local resource pressure
+        ≠
+application architecture failure
+```
+
+and also:
+
+```text
+dependency healthy
+    before
+dependent service starts
+```
+
+The committed Compose file reflects that dependency ordering by starting Schema Registry only after all three Kafka brokers report healthy.
+
+> **Root-cause boundary:** resource pressure was a contributing condition observed during the incident; the project does not claim it was the single proven root cause of every broker or Registry timeout.
+
+### 6. Jenkins Deployment Health-Check Bug
+
+The first deployment health check used a form similar to:
+
+```text
+curl --retry ... /actuator/health | grep '"status":"UP"'
+```
+
+That retried the HTTP command, but not necessarily the complete application-readiness predicate. A response that did not yet satisfy the `UP` check could still make the pipeline fail before the whole readiness check was retried.
+
+The fixed Jenkins stage now retries the **entire** condition:
+
+```text
+curl succeeds
+        +
+response contains "status":"UP"
+        ↓
+application is ready
+```
+
+Current behavior for each service:
+
+- up to 30 checks;
+- 3-second delay between checks;
+- fail the pipeline only after the final unsuccessful check.
+
+```text
+Container running
+      ≠
+Application ready
+```
+
+This is why deployment success is validated through Actuator instead of relying only on `docker run -d`.
+
+### 7. Recovery Principles Used Across the Project
+
+```text
+Database consistency      → local @Transactional boundaries
+Duplicate delivery        → eventId idempotency
+Unsafe DB + Kafka write   → Transactional Outbox
+Transient consumer error  → bounded retry
+Repeated technical error  → DLT
+Outbox send uncertainty   → remain PENDING
+Deployment readiness      → Actuator health verification
+Observability             → Prometheus + Grafana
+```
+
+These mechanisms solve different failure windows; none of them is presented as a single "exactly-once for everything" guarantee.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
@@ -1234,61 +1459,7 @@ Optional notification channel
 - Transactional Outbox pattern
 - Consumer failure and recovery
 - Prometheus metrics
-- Grafana monitoring and alerting\n\n## Production Scenarios Covered
-
-- Duplicate Kafka event delivery without duplicate inventory updates
-- Consumer failure before acknowledgment
-- Retry of temporarily failed records
-- Repeated failure routed to DLT
-- DLT inspection and controlled replay proof-of-concept
-- Schema-based Avro event communication
-- Database transaction with processed-event tracking
-- Transactional Outbox based event publishing
-- Service health and JVM monitoring
-- Service DOWN / recovery alert lifecycle demonstrated; SMTP email delivery is opt-in
-
-## Normal Processing Flow
-
-1. Client sends an order request to `order-service`.
-2. `order-service` creates an Avro order event.
-3. The event is published to the Kafka topic `orders.created.avro`.
-4. `inventory-service` consumes the event.
-5. The consumer checks whether the event was already processed.
-6. Inventory is updated inside a MySQL transaction.
-7. Processed event details are saved for idempotency.
-8. After successful database commit, the Kafka offset is manually acknowledged.
-## Duplicate / Idempotency Flow
-
-1. `inventory-service` receives an event from Kafka.
-2. It checks the `processed_event` table using the event ID.
-3. If the event ID already exists, the event is treated as a duplicate.
-4. Inventory is not updated again.
-5. The duplicate event is skipped safely.
-6. The Kafka offset is acknowledged so the same record is not processed repeatedly.
-## Retry + DLT Flow
-
-1. `inventory-service` consumes an event from Kafka.
-2. If business processing fails, the record is not acknowledged.
-3. Spring Kafka's error handler retries the failed record according to the configured retry policy.
-4. If processing still fails after the retry attempts, the record is sent to the Dead Letter Topic (DLT).
-5. The failed record is isolated in the DLT so the consumer can continue processing other records.
-6. The DLT record can be inspected and reprocessed later after the issue is fixed.
-## Avro + Schema Registry
-
-- Order events are serialized using Apache Avro before being published to Kafka.
-- Avro provides a structured schema for event data.
-- Schema Registry stores and manages the Avro schemas used by producers and consumers.
-- `order-service` uses the schema while producing events.
-- `inventory-service` uses the corresponding schema while consuming events.
-- This keeps the event structure consistent between services and helps avoid incompatible message formats.
-## Database Transaction + Manual Acknowledgment
-
-- Inventory processing runs inside a MySQL transaction.
-- Inventory update and processed-event tracking are committed together.
-- Kafka acknowledgment is done manually only after successful business processing.
-- If processing fails, the offset is not acknowledged.
-- This allows Kafka to retry the record instead of treating it as successfully processed.
-## Key Engineering Decisions
+- Grafana monitoring and alerting\n\n## Key Engineering Decisions
 
 - **Manual Kafka acknowledgment** is used so an offset is acknowledged only after successful business processing.
 - **Idempotency** prevents duplicate Kafka delivery from updating inventory more than once.
