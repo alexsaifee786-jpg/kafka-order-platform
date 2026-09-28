@@ -2234,6 +2234,275 @@ registry-qualified tag
 Docker Hub image
 ```
 
+## Continuous Delivery — Approval, Deployment & Health Verification
+
+After CI has tested, packaged, archived, built, and published the application images, the Jenkins pipeline enters the delivery/deployment phase.
+
+The current pipeline uses a **manual approval gate** before replacing the running local application containers. This is a Continuous Delivery style workflow: the build is prepared for deployment automatically, but a human explicitly approves the deployment step.
+
+### Delivery Flow
+
+```mermaid
+flowchart LR
+    Images[Versioned Docker Images]
+    Push[Docker Hub Push]
+    Approval{Manual Deploy Approval}
+    DeployOrder[Replace Order Service Container]
+    DeployInventory[Replace Inventory Service Container]
+    HealthOrder[Order /actuator/health]
+    HealthInventory[Inventory /actuator/health]
+    Success[Deployment Verified]
+    Fail[Pipeline Failed]
+
+    Images --> Push
+    Push --> Approval
+    Approval -->|Approve| DeployOrder
+    Approval -->|Do not approve| Fail
+    DeployOrder --> DeployInventory
+    DeployInventory --> HealthOrder
+    HealthOrder -->|UP| HealthInventory
+    HealthOrder -->|not UP after retries| Fail
+    HealthInventory -->|UP| Success
+    HealthInventory -->|not UP after retries| Fail
+```
+
+### 1. Manual Approval Gate
+
+The Jenkinsfile pauses at:
+
+```groovy
+input message: "Deploy Build #${BUILD_NUMBER} to local environment?",
+      ok: 'Deploy'
+```
+
+Until someone approves this step, the pipeline does not replace the running application containers.
+
+This creates a clear control point between:
+
+```text
+CI / artifact creation
+        ↓
+human approval
+        ↓
+deployment
+```
+
+That is why the current setup is better described as **Continuous Delivery with a manual deployment gate**, not fully automatic Continuous Deployment.
+
+### 2. Deploy Order Service
+
+Jenkins first removes any existing Order Service container:
+
+```bash
+docker rm -f order-service-container || true
+```
+
+and starts the newly built image:
+
+```text
+order-service:${BUILD_NUMBER}
+```
+
+with:
+
+- container name `order-service-container`;
+- Docker network `kafka-order-platform_default`;
+- host port `8080`;
+- host MySQL URL;
+- internal Kafka broker addresses;
+- internal Schema Registry address.
+
+Runtime connectivity becomes:
+
+```text
+order-service-container
+    ├── MySQL → host.docker.internal:3306/order_db
+    ├── Kafka → kop-kafka-1/2/3:19092
+    └── Schema Registry → kop-schema-registry:8081
+```
+
+### 3. Deploy Inventory Service
+
+The Inventory Service follows the same replace-and-run pattern:
+
+```bash
+docker rm -f inventory-service-container || true
+```
+
+followed by:
+
+```text
+inventory-service:${BUILD_NUMBER}
+```
+
+with:
+
+- container name `inventory-service-container`;
+- Docker network `kafka-order-platform_default`;
+- host port `8082`;
+- host MySQL URL;
+- all three internal Kafka brokers;
+- producer and consumer Schema Registry URLs.
+
+Runtime connectivity becomes:
+
+```text
+inventory-service-container
+    ├── MySQL → host.docker.internal:3306/inventory_db
+    ├── Kafka → kop-kafka-1/2/3:19092
+    ├── Producer Schema Registry → kop-schema-registry:8081
+    └── Consumer Schema Registry → kop-schema-registry:8081
+```
+
+### Runtime Configuration Overrides
+
+The application property files contain localhost values for direct Windows execution.
+
+When Jenkins deploys the services as containers, environment variables override those values.
+
+```text
+Local development
+    → localhost addresses
+
+Docker deployment
+    → container DNS names / host.docker.internal
+```
+
+This allows the same application code to run in both environments without maintaining separate Java implementations.
+
+### 4. Post-Deployment Health Verification
+
+Starting a container is not treated as proof that the Spring Boot application is ready.
+
+Jenkins verifies:
+
+```text
+Order Service:
+http://host.docker.internal:8080/actuator/health
+
+Inventory Service:
+http://host.docker.internal:8082/actuator/health
+```
+
+For each service, the pipeline retries the **complete readiness condition**:
+
+```text
+HTTP request succeeds
+        +
+response contains "status":"UP"
+```
+
+Current retry behavior:
+
+| Setting | Value |
+|---|---:|
+| maximum checks | `30` |
+| delay between checks | `3 seconds` |
+| success condition | Actuator response contains `"status":"UP"` |
+| final failure | Jenkins exits with status `1` |
+
+This provides roughly a 90-second retry window per service, depending on request duration.
+
+### Why the Health Check Was Changed
+
+The deployment health check evolved through several repository commits:
+
+```text
+Add deployment health checks
+        ↓
+Increase retry count
+        ↓
+Increase retry delay
+        ↓
+Fix deployment health-check retry logic
+```
+
+The original approach placed `curl --retry` before a separate `grep`. That could retry connection failures without reliably retrying the entire application-readiness decision.
+
+The final implementation wraps both operations inside the loop:
+
+```bash
+if curl .../actuator/health | grep -q '"status":"UP"'; then
+    # ready
+fi
+```
+
+So the lesson is:
+
+```text
+Container started
+      ≠
+TCP endpoint reachable
+      ≠
+Spring Boot application healthy
+```
+
+The pipeline only accepts the last condition.
+
+### Deployment Version Relationship
+
+For one Jenkins build:
+
+```text
+Build #N
+   ↓
+order-service:N
+inventory-service:N
+   ↓
+manual approval
+   ↓
+local containers run version N
+```
+
+This makes the deployed local application version directly traceable to the Jenkins build number.
+
+### Current Deployment Boundaries
+
+The current workflow intentionally remains a local learning/engineering deployment rather than a production orchestrator.
+
+Important boundaries are documented explicitly:
+
+- deployment uses `docker run`, not Kubernetes or another orchestrator;
+- the old application container is removed before the new one is verified healthy;
+- there is no blue/green or rolling deployment;
+- there is no automated rollback if a new service fails its health check;
+- Order Service is replaced before Inventory Service, so a failure between those stages can leave a temporarily mixed deployment;
+- health verification happens after both deployment stages;
+- the deployment uses the local images built earlier in the Jenkins job rather than pulling them back from Docker Hub.
+
+Therefore the current pipeline demonstrates the **build → approval → deploy → verify** lifecycle without claiming zero-downtime deployment or automated rollback.
+
+### Delivery Responsibility Summary
+
+```text
+CI
+    Checkout
+    Test
+    Package
+    Archive
+    Build image
+        ↓
+Registry
+    Tag
+    Login
+    Push
+        ↓
+Continuous Delivery
+    Manual approval
+        ↓
+Deployment
+    Replace Order container
+    Replace Inventory container
+        ↓
+Verification
+    Order health UP
+    Inventory health UP
+        ↓
+Deployment accepted
+```
+
+This separation makes it clear where a failure happened: source validation, artifact creation, registry publication, deployment execution, or runtime readiness.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
