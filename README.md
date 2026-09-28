@@ -3334,3 +3334,355 @@ Save captures under `docs/screenshots/` using descriptive filenames. Include a s
 Capture only the relevant output. Remove credentials, authorization headers, tokens, personal email addresses, and unrelated records before committing. Preserve the identifiers needed to correlate the sample run. Retain useful log excerpts as text when screenshots would make the evidence difficult to read.
 
 The current repository therefore has a committed monitoring gallery and an explicit capture checklist for the remaining runtime evidence.
+
+## How to Run / Local Setup
+
+This guide targets **Windows PowerShell, Java 17, Docker Desktop with Linux containers, and MySQL running on the Windows host**. Commands are based on the committed configuration and source code. This documentation review did not execute a fresh installation or rerun the applications.
+
+The primary route below runs both Spring Boot applications directly on Windows. Jenkins deployment is an alternative runtime mode described afterward.
+
+### Prerequisites and Ports
+
+Install Git, JDK 17, Docker Desktop with Docker Compose, and MySQL Server with a SQL client such as MySQL Workbench. Configure `JAVA_HOME` and confirm Docker Desktop is running. Maven is supplied by each service's Maven Wrapper; initial dependency and image downloads require internet access.
+
+Run in PowerShell from any folder:
+
+```powershell
+java -version
+git --version
+docker version
+docker compose version
+```
+
+| Component | Windows endpoint | Requirement |
+|---|---|---|
+| MySQL | `localhost:3306` | Running host service; not provisioned by Compose |
+| Kafka brokers | `localhost:9092, localhost:9094, localhost:9096` | Published by Compose |
+| Schema Registry | `http://localhost:8081` | Published by Compose |
+| Order Service | `http://localhost:8080` | Host application or Jenkins-deployed container |
+| Inventory Service | `http://localhost:8082` | Host application or Jenkins-deployed container |
+| Prometheus | `http://localhost:9090` | Published by Compose |
+| Grafana | `http://localhost:3000` | Published by Compose |
+| Jenkins | `http://localhost:8085` | Existing separately configured Jenkins installation |
+
+Do not run host applications and deployed application containers on the same ports simultaneously.
+
+### 1. Open the Repository
+
+For an existing checkout:
+
+```powershell
+Set-Location D:\kafka-order-platform
+git status
+```
+
+Use the existing checkout without recloning or resetting local work. Review any uncommitted changes before updating it.
+
+On a **fresh machine only**, from an existing parent folder such as `D:`:
+
+```powershell
+git clone --branch main https://github.com/alexsaifee786-jpg/kafka-order-platform.git
+Set-Location .\kafka-order-platform
+```
+
+The remaining examples assume `D:kafka-order-platform`; adjust that path if the checkout is elsewhere. There is no root Maven build: run each wrapper inside its service directory.
+
+### 2. Prepare MySQL Databases and Local Credentials
+
+Start the Windows MySQL service. In MySQL Workbench, connect with an account allowed to create databases and run:
+
+```sql
+CREATE DATABASE IF NOT EXISTS order_db;
+CREATE DATABASE IF NOT EXISTS inventory_db;
+CREATE DATABASE IF NOT EXISTS inventory_test_db;
+```
+
+Provide an application account with the required access to these databases, including table creation/update for local Hibernate schema management. Inventory tests also require permission to drop/recreate tables in the dedicated test database.
+
+The current repository contains committed datasource passwords, as documented in the security chapter. Do not reuse or reproduce those values. For this local guide, supply your own credentials through environment overrides; this does not migrate the committed configuration or configure Jenkins Credentials.
+
+**In each PowerShell terminal that will start a service or run tests**, execute:
+
+```powershell
+$dbCredential = Get-Credential -Message "Enter your local MySQL username and password"
+$env:SPRING_DATASOURCE_USERNAME = $dbCredential.UserName
+$env:SPRING_DATASOURCE_PASSWORD = $dbCredential.GetNetworkCredential().Password
+Remove-Variable dbCredential
+```
+
+These variables apply to that terminal and its child processes. Do not print the password variable or save it in a tracked file. A root `.env` file is not automatically a Spring Boot datasource configuration source.
+
+Normal applications use Hibernate `ddl-auto=update`. Inventory tests use `create-drop`: **never point `TEST_DB_URL` or a datasource override for those tests at `inventory_db` or another database containing valuable data**.
+
+### 3. Start and Check Infrastructure
+
+From the repository root:
+
+```powershell
+docker compose config --quiet
+docker compose up -d
+docker compose ps
+```
+
+Compose starts three Kafka brokers, Schema Registry, Prometheus, and Grafana. It does not start MySQL, Jenkins, or the two Spring Boot services.
+
+Wait for all three broker health checks to become healthy. Schema Registry starts after those checks, but still needs its own readiness verification:
+
+```powershell
+Invoke-RestMethod -Uri http://localhost:8081/subjects
+docker compose exec kop-kafka-1 /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server kop-kafka-1:19092 describe --status
+```
+
+The Registry request should succeed; an empty subject list is normal before the first schema is registered. Quorum output should identify an elected leader.
+
+If startup fails, inspect the relevant service:
+
+```powershell
+docker compose logs --tail 100 kop-schema-registry
+docker compose logs --tail 100 kop-kafka-1
+```
+
+### 4. Provision Business Topics on a Fresh Cluster
+
+There is no dedicated business-topic provisioning script in the current repository. The following explicit **fresh-cluster setup choice** creates three partitions and three replicas for each required topic; it is not a claim about the configuration of an existing cluster.
+
+Run from the repository root, after all brokers are ready and before starting the applications:
+
+```powershell
+$topics = @(
+    "orders.created.avro"
+    "orders.created.avro-dlt"
+    "inventory.reserved"
+    "inventory.reservation.failed"
+)
+
+foreach ($topic in $topics) {
+    docker compose exec -T kop-kafka-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kop-kafka-1:19092 --create --if-not-exists --topic $topic --partitions 3 --replication-factor 3
+    if ($LASTEXITCODE -ne 0) { throw "Topic creation failed: $topic" }
+}
+
+docker compose exec kop-kafka-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kop-kafka-1:19092 --describe
+```
+
+`--if-not-exists` leaves existing topics unchanged. Inspect their partitions, replica assignments, and ISR rather than assuming the command changed them. The DLT needs to accommodate the source partition numbers. Do not delete existing topics to match this example.
+
+Business-topic `min.insync.replicas` is not set by this example or declared in the committed provisioning configuration. Kafka transaction-state-topic settings are not business-topic settings.
+
+### 5. Start Inventory Service and Seed a Sample Product
+
+In a dedicated PowerShell terminal, set the MySQL credential variables from step 2, then:
+
+```powershell
+Set-Location D:\kafka-order-platform\inventory-service
+.\mvnw.cmd spring-boot:run
+```
+
+Leave the terminal running. After successful startup, Hibernate has created/updated the local tables. In MySQL Workbench, insert a sample product only if it is absent:
+
+```sql
+INSERT INTO inventory_db.inventory
+    (product_id, available_stock, updated_at, version)
+SELECT 1001, 100, NOW(), 0
+WHERE NOT EXISTS (
+    SELECT 1 FROM inventory_db.inventory WHERE product_id = 1001
+);
+
+SELECT product_id, available_stock, version
+FROM inventory_db.inventory
+WHERE product_id = 1001;
+```
+
+This preserves an existing product's stock. Record the current value and ensure it is at least 2 before the success-path example below. The `version` column belongs to the entity's optimistic locking configuration.
+
+### 6. Start Order Service
+
+In another PowerShell terminal, set the MySQL credential variables from step 2, then:
+
+```powershell
+Set-Location D:\kafka-order-platform\order-service
+.\mvnw.cmd spring-boot:run
+```
+
+Both Maven builds generate the Avro classes through the configured plugin. No manual copying of generated classes is required.
+
+In a third terminal, check both applications:
+
+```powershell
+Invoke-RestMethod -Uri http://localhost:8080/actuator/health
+Invoke-RestMethod -Uri http://localhost:8082/actuator/health
+```
+
+Expect `status` to be `UP`. This confirms the exposed health result; the next step checks the business flow.
+
+### 7. Verify One End-to-End Order
+
+From the verification PowerShell terminal:
+
+```powershell
+$body = @{
+    productId = 1001
+    quantity = 2
+    amount = 500.00
+} | ConvertTo-Json
+
+$response = Invoke-WebRequest -UseBasicParsing -Uri http://localhost:8080/api/orders -Method Post -ContentType "application/json" -Body $body
+$response.StatusCode
+$response.Content
+```
+
+The implemented controller returns HTTP `202` with a text response:
+
+```text
+Order accepted and queued for publishing, orderId=<generated ID>
+```
+
+Acceptance does not mean inventory processing is already complete. Retain the returned order ID and allow the asynchronous publishers and consumers to run.
+
+In MySQL Workbench, replace `123` with that returned ID:
+
+```sql
+SET @sample_order_id = 123;
+
+SELECT id, status, total_amount
+FROM order_db.orders
+WHERE id = @sample_order_id;
+
+SELECT event_id, topic_name, status, published_at
+FROM order_db.outbox_events
+WHERE order_id = @sample_order_id;
+
+SELECT event_id, topic_name, partition_id, kafka_offset
+FROM inventory_db.processed_events
+WHERE order_id = @sample_order_id;
+
+SELECT product_id, available_stock, version
+FROM inventory_db.inventory
+WHERE product_id = 1001;
+
+SELECT event_id, topic_name, status, published_at
+FROM inventory_db.outbox_events
+WHERE order_id = @sample_order_id;
+
+SELECT event_id, topic_name, partition_id, kafka_offset
+FROM order_db.processed_events
+WHERE order_id = @sample_order_id;
+```
+
+For the sufficient-stock path, expect the order to reach `INVENTORY_RESERVED`, the sample stock to decrease by 2, both related outbox publications to reach `PUBLISHED`, and source/result processing records to exist. Re-query if the asynchronous flow is still in progress.
+
+Submitting the HTTP request again creates another order; it is not a duplicate-event test. To test business rejection separately, use an existing product with less stock than the requested quantity. A missing product follows the technical failure path instead.
+
+From the repository root, inspect consumer progress:
+
+```powershell
+docker compose exec kop-kafka-1 /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kop-kafka-1:19092 --describe --group inventory-service-group
+docker compose exec kop-kafka-1 /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kop-kafka-1:19092 --describe --group order-service-group
+```
+
+Lag should settle after processing. Use the database checks to confirm the business result; zero lag alone is not proof of a correct reservation.
+
+### 8. Check Monitoring
+
+Open [Prometheus targets](http://localhost:9090/targets) and confirm the `inventory-service` target becomes `UP`. The committed configuration scrapes `host.docker.internal:8082/actuator/prometheus` every five seconds.
+
+Open [Grafana](http://localhost:3000). On a fresh Grafana volume, configure a Prometheus data source using `http://prometheus:9090`, which resolves inside the Compose network. The existing dashboard and alert screenshots are reference evidence: the repository does not contain dashboard/alert provisioning that automatically recreates those UI settings. An existing `grafana-data` volume retains the locally saved Grafana state.
+
+SMTP is disabled in committed Compose configuration. Email setup is optional and not required to start the platform.
+
+### 9. Run Tests Separately
+
+Use development databases and ensure MySQL and Schema Registry are available. Stop the host applications first with `Ctrl+C` to avoid competing application activity during verification. Keep Compose infrastructure running.
+
+In an Order Service terminal with the credential variables set:
+
+```powershell
+Set-Location D:\kafka-order-platform\order-service
+.\mvnw.cmd test
+```
+
+The current Order context test uses `order_db` and the normal application context; it is not isolated behind a dedicated Order test profile. Use a local development database, not production data.
+
+In an Inventory Service terminal with the credential variables set:
+
+```powershell
+Set-Location D:\kafka-order-platform\inventory-service
+$env:TEST_DB_URL = "jdbc:mysql://localhost:3306/inventory_test_db"
+$env:TEST_SCHEMA_REGISTRY_URL = "http://localhost:8081"
+.\mvnw.cmd test
+```
+
+Inventory integration tests use the dedicated test database. The DLT integration test starts Embedded Kafka but still connects to the external Schema Registry. Reports are written to each service's `target/surefire-reports/`.
+
+A test failure must be investigated from those reports; skipping tests is not evidence that the test suite passed.
+
+### 10. Alternative: Run Through the Existing Jenkins Pipeline
+
+Use the existing Jenkins installation if it is already configured. The repository includes `jenkins-docker/Dockerfile`, but no complete Jenkins launch/job/plugin provisioning definition. Cloning the repository alone does not recreate that environment.
+
+| Jenkins prerequisite | Required setup |
+|---|---|
+| Executor | Linux shell, compatible JDK, Git, curl, and Docker CLI available |
+| Docker access | Executor can reach the same Docker daemon that runs the project infrastructure |
+| Pipeline job | Pipeline from SCM, this repository, branch `main`, script path `Jenkinsfile` |
+| Registry credential | Jenkins username/password credential ID `dockerhub-credentials` with authorized Docker Hub access |
+| MySQL | Host service reachable from Jenkins/application containers, correct grants and credentials |
+| Registry | Reachable from Jenkins at `http://host.docker.internal:8081` |
+| Docker network | `kafka-order-platform_default` exists |
+| Application ports | Host processes on 8080 and 8082 stopped before deployment |
+
+The custom Jenkins Dockerfile currently uses a JDK 21 Jenkins base, while both Maven projects target Java 17. Do not describe the Jenkins controller runtime as Java 17.
+
+For a fresh Compose setup intended for Jenkins deployment, explicitly use the expected project name from the repository root:
+
+```powershell
+docker compose -p kafka-order-platform up -d
+docker network inspect kafka-order-platform_default
+```
+
+For an existing setup, verify its project/network name first; do not launch a second Compose stack with conflicting container names.
+
+**Credential boundary:** the current Jenkinsfile does not bind a MySQL Jenkins credential or pass a datasource password to deployed containers. The local PowerShell overrides above do not configure Jenkins. On a fresh machine with different MySQL credentials, the pipeline requires a deliberate credential migration before tests/deployment can succeed. Do not edit tracked properties to insert a new real password.
+
+Once prerequisites are satisfied, run the configured job, review test/build results, and approve the deployment gate. The pipeline publishes build-number tags, deploys its locally built images, and then performs the two Actuator health checks. It does not pull the images back from Docker Hub.
+
+For the existing webhook workflow, run the configured ngrok client against the Jenkins host port:
+
+```powershell
+ngrok http 8085
+```
+
+Configure the GitHub push webhook to the issued HTTPS forwarding address with `/github-webhook/` appended, and enable the job's GitHub hook trigger for SCM polling. The local ngrok authentication setup, Jenkins plugins/job configuration, and GitHub webhook settings are not provisioned by this repository. Update the webhook address when the tunnel address changes. Verify a successful delivery and its corresponding Jenkins build.
+
+### Troubleshooting Startup
+
+| Symptom | Check first |
+|---|---|
+| `.mvnw.cmd` is not recognized | Run from `order-service` or `inventory-service`, not the repository root |
+| MySQL access denied / unknown database | Host MySQL, database creation, grants, and credential overrides in the actual launch terminal |
+| Schema Registry connection refused | Broker health, Registry logs, host port 8081, and the address appropriate to host vs container execution |
+| Order remains pending | Correlate both outbox rows, source/result topics, application logs, and Registry connectivity |
+| Missing inventory product | Seed the product before submitting the order; missing products follow Retry/DLT |
+| Port 8080 or 8082 already allocated | Check for a host application and an existing deployed container using the same port |
+| Prometheus target down | Inventory health endpoint and Docker-to-host connectivity |
+| Replay script points to an old topic | Some legacy scripts reference `orders.created-dlt`; the current Java flow uses `orders.created.avro-dlt` |
+
+Keep `app.dlt.replay.enabled=false` for normal startup. The replay runner is a controlled proof-of-concept and should not be enabled as part of a routine smoke test.
+
+### Stop Without Deleting Data
+
+Stop host applications with `Ctrl+C` in their respective terminals. If using Jenkins-deployed application containers, stop those separately:
+
+```powershell
+docker stop order-service-container inventory-service-container
+```
+
+From the repository root, stop the Compose infrastructure:
+
+```powershell
+docker compose stop
+```
+
+Use the same Compose project name used during startup if it was explicitly overridden. These stop commands retain the existing named volumes. Do not use `down -v` for a normal shutdown; it removes the Compose-managed named volumes.
+
+Close the credential-bearing PowerShell terminals after use. MySQL and Jenkins are managed separately from this Compose stack.
+
