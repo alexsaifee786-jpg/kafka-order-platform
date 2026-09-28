@@ -644,6 +644,180 @@ The repository contains `InventoryRetryToDltIntegrationTests`, which starts an e
 
 > **Legacy utility note:** files under `scripts/` were created during an earlier pre-Avro phase and still reference `orders.created-dlt`. The current Java configuration and integration test use `orders.created.avro-dlt`; therefore the Java implementation is the source of truth until those helper scripts are modernized.
 
+## Avro, Schema Registry & Schema Evolution
+
+The `orders.created.avro` flow uses Apache Avro as the event contract between Order Service and Inventory Service. Both services keep the same `OrderCreatedEvent` schema under `src/main/avro/order-created.avsc`, and Maven generates the Java `SpecificRecord` class during the `generate-sources` phase.
+
+### OrderCreatedEvent Contract
+
+| Field | Avro type | Purpose |
+|---|---|---|
+| `eventId` | `string` | unique event identity used for idempotency |
+| `orderId` | `long` | business order correlation |
+| `productId` | `long` | inventory product |
+| `quantity` | `int` | requested quantity |
+| `amount` | decimal logical type | order amount, precision `19`, scale `2` |
+| `status` | `string` | event state such as `CREATED` |
+| `occurredAt` | timestamp-millis logical type | event creation time |
+| `source` | `string`, default `UNKNOWN` | event source / schema-evolution field |
+
+The generated record namespace is:
+
+```text
+com.aryan.kafka.avro.OrderCreatedEvent
+```
+
+### Build-Time Code Generation
+
+Both services use:
+
+```text
+org.apache.avro:avro-maven-plugin:1.12.1
+```
+
+during Maven `generate-sources`.
+
+```text
+src/main/avro/order-created.avsc
+        ↓
+avro-maven-plugin
+        ↓
+target/generated-sources/avro
+        ↓
+com.aryan.kafka.avro.OrderCreatedEvent
+```
+
+The plugin is configured with:
+
+- `stringType = String`
+- decimal logical-type support enabled
+
+This keeps the producer and consumer strongly typed instead of passing an unstructured JSON string for the main order-created event.
+
+### Producer Serialization Path
+
+Order Service converts the durable outbox payload into the generated Avro type before publishing.
+
+```mermaid
+flowchart LR
+    Outbox[(ORDER_CREATED\nPENDING)] --> JavaEvent[OrderCreatedEvent DTO]
+    JavaEvent --> AvroRecord[Generated Avro\nOrderCreatedEvent]
+    AvroRecord --> Serializer[KafkaAvroSerializer]
+    Serializer --> Registry[Schema Registry]
+    Serializer --> Kafka[orders.created.avro]
+```
+
+Current producer configuration:
+
+```properties
+spring.kafka.producer.value-serializer=io.confluent.kafka.serializers.KafkaAvroSerializer
+spring.kafka.producer.properties.schema.registry.url=http://localhost:8081
+```
+
+The Order Outbox Publisher explicitly maps the stored event to Avro and sets:
+
+```text
+source = WEB
+```
+
+before sending it to Kafka.
+
+### Consumer Deserialization Path
+
+Inventory Service consumes the same event as the generated Avro type.
+
+```properties
+spring.kafka.consumer.value-deserializer=org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+spring.kafka.consumer.properties.spring.deserializer.value.delegate.class=io.confluent.kafka.serializers.KafkaAvroDeserializer
+spring.kafka.consumer.properties.specific.avro.reader=true
+```
+
+The flow is:
+
+```text
+orders.created.avro
+    ↓
+ErrorHandlingDeserializer
+    ↓
+KafkaAvroDeserializer
+    ↓
+Schema Registry
+    ↓
+com.aryan.kafka.avro.OrderCreatedEvent
+    ↓
+InventoryEventConsumer
+```
+
+`ErrorHandlingDeserializer` wraps the Avro deserializer so deserialization problems can be surfaced to Spring Kafka's error-handling infrastructure instead of being hidden inside the business listener.
+
+### Schema Registry Runtime
+
+Docker Compose runs Confluent Schema Registry as:
+
+```text
+kop-schema-registry
+host port: 8081
+container port: 8081
+```
+
+Schema Registry stores its metadata in Kafka using all three internal broker addresses:
+
+```text
+kop-kafka-1:19092
+kop-kafka-2:19092
+kop-kafka-3:19092
+```
+
+Its internal Kafka store topic is configured with replication factor `3`.
+
+Connection path depends on where the Spring Boot application runs:
+
+| Runtime | Schema Registry URL |
+|---|---|
+| application running on Windows host | `http://localhost:8081` |
+| Jenkins-deployed Docker container | `http://kop-schema-registry:8081` |
+
+### Schema Evolution Demonstrated
+
+The current schema contains the later-added field:
+
+```json
+{
+  "name": "source",
+  "type": "string",
+  "default": "UNKNOWN"
+}
+```
+
+Providing a default is the Avro-compatible pattern used when a newer reader needs a field that older records may not contain. New events produced by Order Service set `source=WEB`, while the default gives the reader a value when that field is absent in older compatible data.
+
+Inventory Service also logs the field during consumption:
+
+```text
+Schema evolution check: orderId=<id>, source=<value>
+```
+
+> **Compatibility boundary:** the repository demonstrates a schema-evolution-friendly field change, but it does not source-control a Schema Registry compatibility mode such as BACKWARD or FULL. The README therefore does not claim that Registry-level compatibility enforcement is configured.
+
+### DLT and Avro
+
+When an Avro `OrderCreatedEvent` exhausts retries, the DLT path preserves the event as an Avro record. `InventoryDltConsumer` reads the DLT value as bytes and explicitly uses `KafkaAvroDeserializer` plus Schema Registry to reconstruct the original `OrderCreatedEvent`.
+
+The retry-to-DLT integration test also deserializes the DLT value with `KafkaAvroDeserializer`, verifying that the failed record remains readable as the same Avro event type.
+
+### Event-Format Boundary
+
+Avro is currently used for the main Order Service → Inventory Service `orders.created.avro` contract and its DLT path.
+
+The Inventory Service result events:
+
+```text
+inventory.reserved
+inventory.reservation.failed
+```
+
+are currently serialized as JSON by `InventoryValueSerializer`. This is intentional documentation of the **current repository state**; the project does not claim that every Kafka topic uses Avro.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
