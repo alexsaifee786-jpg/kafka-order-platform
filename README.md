@@ -1,14 +1,37 @@
 # Kafka Order Platform
 
-A Spring Boot event-driven order processing platform using Apache Kafka.
+## Project Overview
 
-The order-service publishes Avro order events to Kafka.
-The inventory-service consumes them, updates inventory inside a MySQL transaction,
-prevents duplicate processing, manually acknowledges Kafka offsets,
-retries failed records, and sends unrecoverable records to DLT.
+Kafka Order Platform is an event-driven backend project built with Java 17, Spring Boot, Apache Kafka, MySQL, Avro, and Docker.
 
-The platform is monitored using Spring Boot Actuator, Micrometer,
-Prometheus and Grafana with email alerts for service failures.
+The project contains two independent Spring Boot services:
+
+- **order-service** — accepts order requests, stores order state in MySQL, writes events using the Transactional Outbox pattern, and publishes Avro events to Kafka.
+- **inventory-service** — consumes Kafka events, validates and updates inventory inside a MySQL transaction, prevents duplicate processing, and manually acknowledges Kafka offsets after successful processing.
+
+The platform implements production-style reliability and delivery practices such as:
+
+- 3-node Kafka KRaft cluster
+- Transactional Outbox pattern
+- At-least-once event delivery
+- Idempotent consumer processing
+- Manual Kafka acknowledgment
+- Retry with fixed backoff
+- Dead Letter Topic (DLT)
+- Avro serialization with Schema Registry
+- MySQL transactional processing
+- Spring Boot Actuator and Micrometer
+- Prometheus and Grafana monitoring
+- Service-down alerting and recovery notification
+- Dockerized services and infrastructure
+- Jenkins CI/CD pipeline
+- GitHub webhook-based automatic build triggering
+- Versioned Docker images
+- Docker Hub image publishing
+- Approval-based deployment
+- Post-deployment health verification
+
+The goal of this project is not only to demonstrate a working Kafka producer-consumer flow, but also to show how common production-style failure scenarios—such as duplicate delivery, consumer crashes, publishing failures, retry exhaustion, schema communication delays, deployment failures, and service outages—can be handled, observed, and verified.
 
 ## Tech Stack
 
