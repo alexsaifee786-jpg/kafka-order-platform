@@ -364,6 +364,156 @@ publisher retries until Kafka publish succeeds
 
 This does not make MySQL and Kafka one distributed transaction. Instead, it removes the direct dual-write dependency by making the database the durable source for pending publication.
 
+## Inventory Processing, Idempotency & Manual Acknowledgment
+
+The Inventory Service consumes `OrderCreatedEvent` records from `orders.created.avro` using consumer group `inventory-service-group`. Auto commit is disabled and the listener uses `manual_immediate` acknowledgment.
+
+```text
+spring.kafka.consumer.enable-auto-commit=false
+spring.kafka.listener.ack-mode=manual_immediate
+```
+
+This keeps Kafka progress tied to the result of business processing instead of a timer-based auto commit.
+
+### Consumer Flow
+
+```mermaid
+flowchart TD
+    Kafka[orders.created.avro] --> Listener[InventoryEventConsumer]
+    Listener --> Check{eventId already processed?}
+
+    Check -->|Yes| Duplicate[Skip inventory update]
+    Duplicate --> Ack1[Manual ACK]
+
+    Check -->|No| Tx[InventoryProcessingService\n@Transactional]
+    Tx --> Stock{Enough stock?}
+
+    Stock -->|Yes| Update[Reduce available stock]
+    Update --> Processed1[(processed_events)]
+    Processed1 --> ReservedOutbox[(outbox_events\nINVENTORY_RESERVED · PENDING)]
+    ReservedOutbox --> Commit1[Commit MySQL transaction]
+    Commit1 --> Ack2[Manual ACK]
+
+    Stock -->|No| NoStock[Keep stock unchanged]
+    NoStock --> Processed2[(processed_events)]
+    Processed2 --> FailedOutbox[(outbox_events\nINVENTORY_RESERVATION_FAILED · PENDING)]
+    FailedOutbox --> Commit2[Commit MySQL transaction]
+    Commit2 --> Ack3[Manual ACK]
+```
+
+### Idempotent Consumer
+
+Every incoming business event has an `eventId`. Before changing inventory, `InventoryProcessingService` checks:
+
+```text
+processedEventRepository.existsByEventId(eventId)
+```
+
+The `processed_events.event_id` column is also declared `UNIQUE`.
+
+If the event was already processed:
+
+- the inventory lookup/update is skipped;
+- no second stock deduction is performed;
+- the listener logs `Duplicate event skipped`;
+- the duplicate Kafka delivery is acknowledged.
+
+This is important because Kafka delivery can repeat, for example when business work commits successfully but the consumer crashes before its offset is committed.
+
+### Successful Reservation
+
+For a new event with enough stock, one local MySQL transaction performs the business work:
+
+1. loads inventory by `productId`;
+2. records the incoming Kafka event in `processed_events`;
+3. reduces `available_stock`;
+4. updates `updated_at`;
+5. creates an inventory outbox row:
+   - topic: `inventory.reserved`
+   - event type: `INVENTORY_RESERVED`
+   - status: `PENDING`;
+6. commits the transaction.
+
+After `InventoryProcessingService.process()` returns successfully, the listener calls:
+
+```java
+acknowledgment.acknowledge();
+```
+
+Because the business method is transactional, a successful return means its transaction boundary has completed before the listener reaches the manual ACK call.
+
+### Insufficient Stock Is a Business Result
+
+Insufficient stock is handled differently from a technical processing failure.
+
+When:
+
+```text
+availableStock < requestedQuantity
+```
+
+the service:
+
+- does **not** reduce inventory;
+- records the source event in `processed_events`;
+- creates an `INVENTORY_RESERVATION_FAILED` outbox event;
+- stores reason `Insufficient stock`;
+- keeps the outgoing outbox row as `PENDING`;
+- commits the transaction;
+- acknowledges the source Kafka record.
+
+So an expected business rejection becomes a result event for Order Service; it is not automatically treated as a retry/DLT error.
+
+### Processed Event Audit Data
+
+For each newly handled source event, `processed_events` stores:
+
+| Field | Purpose |
+|---|---|
+| `event_id` | duplicate-detection key |
+| `order_id` | business correlation |
+| `topic_name` | source Kafka topic |
+| `partition_id` | source partition |
+| `kafka_offset` | source offset |
+| `processed_at` | processing timestamp |
+
+This gives both duplicate protection and a small audit trail linking the database work back to the consumed Kafka record.
+
+### Concurrent Inventory Updates
+
+The `Inventory` entity contains a JPA `@Version` field. Hibernate uses this version for optimistic locking so a concurrent conflicting inventory update is detected instead of silently overwriting another committed change.
+
+Because the listener acknowledges only after the transactional processing call completes, a transaction failure does not reach the normal ACK line.
+
+### Verification in Tests
+
+The repository includes focused tests for this behavior:
+
+- `shouldSkipInventoryUpdateWhenAlreadyProcessed()` verifies a duplicate does not touch the inventory repository.
+- `shouldUpdateInventoryWhenEventIsNew()` verifies stock is reduced for a new event.
+- `shouldSaveFailureEventWhenStockIsInsufficient()` verifies stock stays unchanged and a `PENDING` rejection outbox event is created.
+- `InventoryDatabaseIntegrationTest` verifies against MySQL that inventory and the processed-event record are stored together for a successful event.
+
+### Failure Window This Design Protects
+
+```text
+Kafka delivers event
+    ↓
+MySQL transaction succeeds
+    ↓
+consumer crashes before offset commit
+    ↓
+Kafka redelivers same event
+    ↓
+eventId already exists
+    ↓
+business update is skipped
+    ↓
+offset can be acknowledged safely
+```
+
+This is the project's main protection against duplicate business effects while still using at-least-once Kafka delivery.
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
@@ -377,7 +527,7 @@ This does not make MySQL and Kafka one distributed transaction. Instead, it remo
 - Transactional Outbox pattern
 - Consumer failure and recovery
 - Prometheus metrics
-- Grafana monitoring and alerting## Production Scenarios Covered
+- Grafana monitoring and alerting\n\n## Production Scenarios Covered
 
 - Duplicate Kafka event delivery without duplicate inventory updates
 - Consumer failure before acknowledgment
