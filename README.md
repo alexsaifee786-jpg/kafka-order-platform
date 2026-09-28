@@ -22,7 +22,7 @@ The platform implements production-style reliability and delivery practices such
 - MySQL transactional processing
 - Spring Boot Actuator and Micrometer
 - Prometheus and Grafana monitoring
-- Service-down alerting and recovery notification
+- Grafana service-down alerting and recovery-state monitoring
 - Dockerized services and infrastructure
 - Jenkins CI/CD pipeline
 - GitHub webhook-based automatic build triggering
@@ -1026,6 +1026,201 @@ This distinction is intentional in the documentation:
 - **insufficient stock** → handled business result → `INVENTORY_REJECTED`;
 - **technical processing failure** → Retry → DLT → operator/recovery workflow.
 
+## Monitoring, Metrics & Alerting
+
+The platform uses Spring Boot Actuator, Micrometer, Prometheus, and Grafana to make application health and JVM/runtime behavior visible during local and CI/CD testing.
+
+### Monitoring Flow
+
+```mermaid
+flowchart LR
+    App[Inventory Service\n:8082]
+    Actuator[Spring Boot Actuator]
+    Micrometer[Micrometer]
+    Endpoint[/actuator/prometheus]
+    Prometheus[Prometheus\n:9090]
+    Grafana[Grafana\n:3000]
+    Alert[Grafana Alert Rule]
+    Notify[Optional Email Notification]
+
+    App --> Actuator
+    Actuator --> Micrometer
+    Micrometer --> Endpoint
+    Endpoint --> Prometheus
+    Prometheus --> Grafana
+    Grafana --> Alert
+    Alert -. SMTP enabled locally .-> Notify
+```
+
+### What Each Layer Does
+
+| Component | Responsibility in this project |
+|---|---|
+| Spring Boot Actuator | exposes application health and management endpoints |
+| Micrometer | publishes JVM/application metrics in a meter-based format |
+| Prometheus | scrapes and stores the metrics time series |
+| Grafana | queries Prometheus and visualizes the metrics |
+| Grafana Alerting | evaluates service-availability conditions and tracks firing/resolved states |
+
+Both Spring Boot services expose:
+
+```text
+/actuator/health
+/actuator/prometheus
+```
+
+through:
+
+```properties
+management.endpoints.web.exposure.include=health,prometheus
+```
+
+### Current Prometheus Target
+
+The committed `monitoring/prometheus.yml` currently scrapes **Inventory Service** every five seconds:
+
+```yaml
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'inventory-service'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['host.docker.internal:8082']
+```
+
+So the current source-controlled monitoring path is:
+
+```text
+inventory-service :8082
+        ↓
+/actuator/prometheus
+        ↓
+Prometheus :9090
+        ↓
+Grafana :3000
+```
+
+> **Current repository boundary:** Order Service exposes a Prometheus endpoint too, but the committed `prometheus.yml` does not currently scrape it. The documentation therefore does not claim full two-service Prometheus coverage.
+
+### Useful Health and Metrics Endpoints
+
+When the services are running locally:
+
+| Purpose | Endpoint |
+|---|---|
+| Order Service health | `http://localhost:8080/actuator/health` |
+| Order Service Prometheus metrics | `http://localhost:8080/actuator/prometheus` |
+| Inventory Service health | `http://localhost:8082/actuator/health` |
+| Inventory Service Prometheus metrics | `http://localhost:8082/actuator/prometheus` |
+| Prometheus UI | `http://localhost:9090` |
+| Grafana UI | `http://localhost:3000` |
+
+### Service Availability with the `up` Metric
+
+Prometheus exposes an `up` series for each scrape target:
+
+```text
+up = 1  → target scrape succeeded
+up = 0  → target scrape failed
+```
+
+The local Grafana alerting demo used this availability signal to observe the Inventory Service going down and later recovering.
+
+```text
+Inventory Service healthy
+        ↓
+Prometheus up = 1
+        ↓
+service stops / becomes unreachable
+        ↓
+Prometheus up = 0
+        ↓
+Grafana alert → FIRING
+        ↓
+service returns
+        ↓
+Prometheus up = 1
+        ↓
+Grafana alert → RESOLVED
+```
+
+### Dashboard Coverage
+
+The committed runtime evidence shows a Grafana dashboard used to visualize:
+
+- Inventory Service availability;
+- CPU/runtime activity;
+- JVM heap-memory usage.
+
+The Grafana container uses the named volume:
+
+```text
+grafana-data:/var/lib/grafana
+```
+
+so UI-created dashboards, data-source configuration, and alert state/configuration can survive container recreation on the same Docker installation.
+
+> **Provisioning boundary:** the repository does not contain Grafana dashboard JSON or alert-rule provisioning files. The demonstrated dashboard and alert were configured in the local Grafana instance and persisted in the Docker volume rather than source-controlled as code.
+
+### Alerting and Email Notification Boundary
+
+The repository contains screenshot evidence for both alert states:
+
+- `docs/screenshots/grafana-alert-firing.png`
+- `docs/screenshots/grafana-alert-resolved.png`
+
+Email notification was also exercised during the local monitoring work, using SMTP credentials kept outside Git.
+
+However, the **current committed Docker Compose configuration intentionally has SMTP disabled by default**:
+
+```yaml
+GF_SMTP_ENABLED: "false"
+```
+
+Therefore:
+
+```text
+Grafana alert evaluation      → available in current setup
+FIRING / RESOLVED state       → demonstrated
+SMTP email delivery           → opt-in, not enabled by default in committed Compose
+```
+
+The repository's `.env.example` keeps only safe placeholder values for an optional local SMTP setup. Real SMTP credentials must never be committed.
+
+### Runtime Evidence Already in the Repository
+
+The following screenshots are already committed under `docs/screenshots/`:
+
+| Evidence | File |
+|---|---|
+| Prometheus target reachable | `prometheus-target-up.png` |
+| Grafana monitoring dashboard | `grafana-monitoring-dashboard.png` |
+| Service-down alert firing | `grafana-alert-firing.png` |
+| Service recovery / resolved state | `grafana-alert-resolved.png` |
+
+These images provide runtime proof of the monitoring path instead of relying only on configuration files.
+
+### Monitoring Scope Summary
+
+```text
+Actuator
+  exposes health + metrics
+        ↓
+Micrometer
+  instruments / formats metrics
+        ↓
+Prometheus
+  scrapes inventory-service every 5s
+        ↓
+Grafana
+  dashboard + alert evaluation
+        ↓
+Optional notification channel
+  enabled only when SMTP is explicitly configured
+```
+
 ## Key Interview Concepts
 
 - Kafka producer and consumer flow
@@ -1050,7 +1245,7 @@ This distinction is intentional in the documentation:
 - Database transaction with processed-event tracking
 - Transactional Outbox based event publishing
 - Service health and JVM monitoring
-- Service DOWN email alert and recovery notification
+- Service DOWN / recovery alert lifecycle demonstrated; SMTP email delivery is opt-in
 
 ## Normal Processing Flow
 
@@ -1093,16 +1288,6 @@ This distinction is intentional in the documentation:
 - Kafka acknowledgment is done manually only after successful business processing.
 - If processing fails, the offset is not acknowledged.
 - This allows Kafka to retry the record instead of treating it as successfully processed.
-## Monitoring & Alerting
-
-- Spring Boot Actuator exposes application health and runtime metrics.
-- Micrometer converts application metrics into Prometheus-compatible metrics.
-- Prometheus scrapes metrics from `inventory-service`.
-- Grafana visualizes CPU usage, JVM heap memory, and service availability.
-- A Grafana alert monitors the `up` metric for `inventory-service`.
-- If the service goes down, Grafana sends an email alert through Gmail SMTP.
-- When the service becomes healthy again, Grafana sends a resolved notification.
-- Grafana data is stored in a persistent Docker volume so dashboards and alert configuration survive container recreation.
 ## Key Engineering Decisions
 
 - **Manual Kafka acknowledgment** is used so an offset is acknowledged only after successful business processing.
@@ -1164,27 +1349,24 @@ http://localhost:3000
 ```
 ## Environment Setup
 
-Create a local `.env` file in the project root:
+The committed Docker Compose setup does not require SMTP credentials for normal Kafka, Schema Registry, Prometheus, or Grafana startup.
 
-```env
-GRAFANA_SMTP_PASSWORD=YOUR_GMAIL_APP_PASSWORD
-```
-
-The real `.env` file is ignored by Git and should never be committed.
-
-A safe template is provided in:
+For optional Grafana email-notification testing, a safe placeholder template is kept in:
 
 ```text
 .env.example
 ```
 
-Grafana reads the password through Docker Compose:
+The current `docker-compose.yml` keeps:
 
 ```yaml
-GF_SMTP_PASSWORD: "${GRAFANA_SMTP_PASSWORD}"
+GF_SMTP_ENABLED: "false"
 ```
 
-This keeps the Gmail App Password outside the repository.
+so SMTP is **disabled by default** and the placeholder values are not consumed unless SMTP configuration is explicitly wired back into the local Compose setup.
+
+Never commit a real Gmail App Password, Docker Hub token, webhook secret, or any other credential.
+
 ## Screenshots
 
 ### Prometheus Target Health
