@@ -69,6 +69,29 @@ pipeline {
                 sh "docker build -t inventory-service:${BUILD_NUMBER} ./inventory-service"
             }
         }
+        stage('Docker Hub Login') {
+            steps {
+                withCredentials([usernamePassword(
+            credentialsId: 'dockerhub-credentials',
+            usernameVariable: 'DOCKERHUB_USERNAME',
+            passwordVariable: 'DOCKERHUB_TOKEN'
+        )]) {
+                    sh 'echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin'
+        }
+            }
+        }
+        stage('Push Order Docker Image') {
+    steps {
+        sh 'docker tag order-service:${BUILD_NUMBER} saifee162007/order-service:${BUILD_NUMBER}'
+        sh 'docker push saifee162007/order-service:${BUILD_NUMBER}'
+    }
+}
+stage('Push Inventory Docker Image') {
+    steps {
+        sh 'docker tag inventory-service:${BUILD_NUMBER} saifee162007/inventory-service:${BUILD_NUMBER}'
+        sh 'docker push saifee162007/inventory-service:${BUILD_NUMBER}'
+    }
+}
         stage('Approval for Deploy') {
             steps {
                 input message: "Deploy Build #${BUILD_NUMBER} to local environment?",
@@ -76,8 +99,8 @@ pipeline {
             }
         }
         stage('Deploy Order Service') {
-    steps {
-        sh '''
+            steps {
+                sh '''
             docker rm -f order-service-container || true
 
             docker run -d \
@@ -89,12 +112,12 @@ pipeline {
               -e SPRING_KAFKA_PRODUCER_PROPERTIES_SCHEMA_REGISTRY_URL=http://kop-schema-registry:8081 \
               order-service:${BUILD_NUMBER}
         '''
-    }
-}
+            }
+        }
 
-stage('Deploy Inventory Service') {
-    steps {
-        sh '''
+        stage('Deploy Inventory Service') {
+            steps {
+                sh '''
             docker rm -f inventory-service-container || true
 
             docker run -d \
@@ -107,11 +130,11 @@ stage('Deploy Inventory Service') {
               -e SPRING_KAFKA_CONSUMER_PROPERTIES_SCHEMA_REGISTRY_URL=http://kop-schema-registry:8081 \
               inventory-service:${BUILD_NUMBER}
         '''
-    }
-}
-stage('Health Check') {
-    steps {
-        sh '''
+            }
+        }
+        stage('Health Check') {
+            steps {
+                sh '''
             echo "Checking Order Service..."
 
             for i in $(seq 1 30); do
@@ -144,7 +167,7 @@ stage('Health Check') {
                 sleep 3
             done
         '''
-    }
-}
+            }
+        }
     }
 }
