@@ -2947,4 +2947,556 @@ This protection helps prevent future accidental commits, but it does not erase c
 | MySQL password | currently committed in properties | **needs externalization + rotation** |
 | `.env` | ignored by Git | correct |
 
-#
+### Screenshots and Logs
+
+Before committing screenshots or sharing terminal output, verify that the image does not expose:
+
+- passwords;
+- personal access tokens;
+- Docker Hub tokens;
+- ngrok tokens;
+- SMTP App Passwords;
+- Jenkins credential values.
+
+Showing a Jenkins **credential ID** is acceptable; showing the stored credential value is not.
+
+### Configuration Management Summary
+
+```text
+Repository
+    → code + safe defaults + credential IDs
+
+Environment variables
+    → environment-specific addresses/settings
+
+Jenkins Credentials
+    → CI/CD secrets
+
+Ignored local files
+    → developer-machine secrets
+
+Never Git
+    → real passwords / tokens
+```
+
+This chapter documents both the implemented secure patterns and the remaining database-password gap so the repository does not overstate its current security posture.
+
+## Testing Strategy & Verification Evidence
+
+The current repository combines lightweight unit tests, Spring Boot context tests, database integration testing, embedded-Kafka testing, and manual end-to-end verification.
+
+The source tree currently defines **13 JUnit test methods across 6 test classes**.
+
+### Test Coverage Map
+
+```mermaid
+flowchart TB
+    E2E[Manual End-to-End Verification]
+    Kafka[Embedded Kafka + DLT Integration]
+    DB[MySQL Integration Test]
+    Unit[Mockito / Focused Unit Tests]
+    Context[Spring Boot Context Tests]
+
+    E2E --> Kafka
+    Kafka --> DB
+    DB --> Unit
+    Unit --> Context
+```
+
+This is not presented as a perfect formal test pyramid; it is the actual coverage currently implemented in the project.
+
+### Current Automated Test Inventory
+
+| Test class | Type | Test methods | Main behavior verified |
+|---|---|---:|---|
+| `OrderServiceApplicationTests` | Spring context | 1 | Order Service application context loads |
+| `OutboxPublisherTest` | focused unit test | 6 | Order outbox success, timeout, failure, interruption, retry behavior |
+| `InventoryServiceApplicationTests` | Spring context | 1 | Inventory Service application context loads with test profile |
+| `InventoryProcessingServiceTest` | focused unit test | 3 | duplicate skip, stock reservation, insufficient-stock rejection outbox |
+| `InventoryDatabaseIntegrationTest` | MySQL integration | 1 | inventory update + processed-event persistence |
+| `InventoryRetryToDltIntegrationTests` | Embedded Kafka integration | 1 | failed Avro event reaches DLT with failure metadata |
+
+Total:
+
+```text
+Order Service    7 tests
+Inventory Service 6 tests
+------------------------
+Repository total 13 tests
+```
+
+### 1. Spring Boot Context Tests
+
+Both services contain a basic `contextLoads()` test.
+
+Their purpose is simple:
+
+```text
+Spring configuration
+    +
+bean creation
+    +
+application context startup
+    ↓
+contextLoads passes
+```
+
+These tests are useful as startup/configuration smoke tests, but they do not by themselves prove the full Kafka business flow.
+
+### 2. Order Outbox Reliability Tests
+
+`OutboxPublisherTest` is the strongest focused Order Service test class in the current repository.
+
+It uses mocked repositories and producer behavior to test six important cases.
+
+#### Successful Kafka acknowledgment
+
+```text
+PENDING row
+    ↓
+Kafka send succeeds
+    ↓
+row becomes PUBLISHED
+    ↓
+publishedAt is stored
+```
+
+The test also verifies that the row is still `PENDING` before the simulated Kafka acknowledgment completes.
+
+#### Timeout keeps the row pending
+
+A deliberately stalled `CompletableFuture` is used to simulate a send that does not finish within the configured wait.
+
+Expected behavior:
+
+```text
+send timeout
+    ↓
+row remains PENDING
+    ↓
+late ACK does not silently mark it published
+    ↓
+later scheduler run retries
+    ↓
+successful retry → PUBLISHED
+```
+
+#### Asynchronous Kafka failure
+
+A failed future simulates a broker-side timeout.
+
+The expected result is:
+
+```text
+Kafka failure
+    ↓
+no PUBLISHED update
+    ↓
+outbox remains retryable
+```
+
+#### Synchronous serialization failure
+
+The producer is made to throw a serialization exception immediately, representing a failure that can occur before a Kafka future is returned.
+
+Again, the row must remain `PENDING`.
+
+#### Thread interruption
+
+The test verifies that:
+
+- the interrupt flag is preserved;
+- the row remains `PENDING`;
+- the current outbox batch stops instead of continuing to send more records.
+
+#### Empty poll
+
+When there are no `PENDING` rows, the publisher must not call the producer or save unnecessary database changes.
+
+### 3. Inventory Business-Logic Unit Tests
+
+`InventoryProcessingServiceTest` uses Mockito repositories and a real `ObjectMapper`.
+
+It covers three core business paths.
+
+#### Duplicate event
+
+```text
+eventId already exists
+    ↓
+process() returns false
+    ↓
+inventory repository is not touched
+    ↓
+no new ProcessedEvent is saved
+```
+
+This verifies the first idempotency guard before stock work begins.
+
+#### New event with enough stock
+
+The test starts with:
+
+```text
+available stock = 10
+requested       = 2
+```
+
+and verifies:
+
+```text
+resulting stock = 8
+```
+
+while also confirming that the incoming event is recorded through the processed-event repository.
+
+#### Insufficient stock
+
+The test verifies that:
+
+- stock is not reduced;
+- the incoming event is marked processed;
+- an outbox event is created;
+- target topic is `inventory.reservation.failed`;
+- event type is `INVENTORY_RESERVATION_FAILED`;
+- outbox status is `PENDING`;
+- JSON payload contains the source event ID, order/product data, `REJECTED`, and `Insufficient stock`.
+
+This distinguishes a valid business rejection from a technical consumer failure.
+
+### 4. MySQL Integration Test
+
+`InventoryDatabaseIntegrationTest` runs with `@SpringBootTest` and the `test` profile against:
+
+```text
+inventory_test_db
+```
+
+The database URL can be overridden using:
+
+```text
+TEST_DB_URL
+```
+
+and Jenkins currently points it to MySQL on the host through `host.docker.internal`.
+
+The test:
+
+1. clears test inventory and processed-event data;
+2. inserts inventory with stock `10`;
+3. processes an event requesting quantity `2`;
+4. reloads the inventory from MySQL;
+5. verifies stock is now `8`;
+6. verifies the event ID exists in `processed_events`.
+
+This checks real JPA/MySQL persistence rather than only mocked repository calls.
+
+> **Current boundary:** the test proves the successful persistence path. It does not deliberately force a mid-transaction database exception to prove rollback behavior in the current source-controlled suite.
+
+### 5. Retry-to-DLT Integration Test
+
+`InventoryRetryToDltIntegrationTests` uses:
+
+```text
+@SpringBootTest
++
+@EmbeddedKafka(partitions = 3)
+```
+
+with two test topics:
+
+```text
+orders.created.avro
+orders.created.avro-dlt
+```
+
+The source Kafka connection is redirected to the embedded broker while Schema Registry remains configurable through:
+
+```text
+TEST_SCHEMA_REGISTRY_URL
+```
+
+The test publishes an Avro event using a deliberately missing product:
+
+```text
+productId = 999
+```
+
+Inventory processing throws, the configured retry/DLT mechanism runs, and the test consumes the resulting DLT record.
+
+It verifies:
+
+- Kafka key is preserved;
+- `orderId` is preserved;
+- `productId` is preserved;
+- DLT exception-cause header identifies `IllegalArgumentException`;
+- DLT exception message contains the missing-product failure;
+- original-topic header identifies `orders.created.avro`.
+
+This is stronger than only unit-testing the `DefaultErrorHandler` configuration because it verifies the event actually reaches the DLT.
+
+### 6. Test Profile & External Dependencies
+
+Inventory tests use:
+
+```text
+@ActiveProfiles("test")
+```
+
+and the test configuration disables normal listener auto-startup by default.
+
+The DLT integration test explicitly turns listener startup back on for that test.
+
+The current CI dependency picture is:
+
+```text
+Unit tests
+    → mostly local / mocked
+
+Inventory DB integration
+    → real MySQL inventory_test_db
+
+Retry/DLT integration
+    → Embedded Kafka
+    → external Schema Registry
+
+Jenkins
+    → supplies TEST_DB_URL
+    → supplies TEST_SCHEMA_REGISTRY_URL
+```
+
+This explains why the Inventory test stage can fail when Schema Registry is unavailable even though Kafka itself is embedded for the DLT test.
+
+### 7. Real Test-Infrastructure Failure Encountered
+
+During CI work, the retry-to-DLT integration test once failed with a Schema Registry connection refusal.
+
+The application code was not the root fix in that incident.
+
+The dependency chain was:
+
+```text
+Kafka broker health problem
+    ↓
+Schema Registry did not become available
+    ↓
+Avro integration test could not reach Registry
+    ↓
+test failed
+```
+
+After the Kafka/Schema Registry infrastructure recovered, the test was rerun successfully without requiring a business-code or Jenkinsfile change.
+
+This is an important testing lesson:
+
+```text
+test failure
+    ≠ always application logic failure
+```
+
+External test dependencies must be checked before changing working code.
+
+### 8. Manual End-to-End Verification
+
+In addition to automated tests, the project was exercised manually through the complete runtime flow.
+
+A successful verification followed this chain:
+
+```text
+POST /api/orders
+    ↓
+HTTP 202 Accepted
+    ↓
+Order outbox PENDING
+    ↓
+Kafka publish succeeds
+    ↓
+Order outbox PUBLISHED
+    ↓
+Inventory consumes event
+    ↓
+stock updated
+    ↓
+Inventory result published
+    ↓
+Order consumes result
+    ↓
+order status = INVENTORY_RESERVED
+```
+
+During the final outbox-reliability verification, the observed flow completed successfully with no remaining pending Order outbox rows from that verification run.
+
+Manual checks were also used for:
+
+- duplicate-event behavior;
+- retry/DLT behavior;
+- consumer-group lag;
+- Kafka broker/quorum health;
+- Prometheus target health;
+- Grafana alert firing/resolution;
+- Jenkins deployment health.
+
+These manual checks complement the automated suite; they are not a replacement for automated regression tests.
+
+### 9. CI Test Gates
+
+The Jenkins pipeline runs tests before packaging and Docker image creation:
+
+```text
+Order tests
+    ↓ pass
+Order package
+    ↓
+Inventory tests
+    ↓ pass
+Inventory package
+    ↓
+Docker image build
+```
+
+A failing test therefore blocks the normal pipeline before a new application image reaches the later delivery/deployment stages.
+
+### Current Testing Gaps
+
+The README intentionally records what is **not yet covered** by dedicated automated tests:
+
+- no dedicated controller/API test for `POST /api/orders`;
+- no focused automated test for Order Service result consumers;
+- no dedicated automated rollback-failure test for the Inventory MySQL transaction;
+- no Testcontainers-based MySQL/Schema Registry environment;
+- no source-controlled automated full two-service end-to-end test;
+- no automated deployment rollback test;
+- no load/performance test suite;
+- no contract test that actively checks Schema Registry compatibility mode.
+
+These gaps do not invalidate the current tests; they define the next level of test maturity.
+
+### Testing Summary
+
+```text
+Context tests
+    → application can start
+
+Focused unit tests
+    → business and outbox decisions
+
+MySQL integration
+    → real persistence behavior
+
+Embedded Kafka integration
+    → retry + DLT behavior
+
+Manual E2E
+    → complete deployed event flow
+
+Jenkins
+    → enforces tests before build/deploy
+```
+
+The testing strategy is therefore centered on the project's highest-risk areas: duplicate processing, database state, outbox reliability, Avro/Kafka error handling, and deployment readiness.
+
+## Key Interview Concepts
+
+- Kafka producer and consumer flow
+- Kafka partitions, offsets and consumer groups
+- Manual acknowledgment
+- At-least-once delivery
+- Idempotent event processing
+- Database transaction boundaries
+- Retry and Dead Letter Topic (DLT)
+- Avro serialization and Schema Registry
+- Transactional Outbox pattern
+- Consumer failure and recovery
+- Prometheus metrics
+- Grafana monitoring and alerting\n\n## Key Engineering Decisions
+
+- **Manual Kafka acknowledgment** is used so an offset is acknowledged only after successful business processing.
+- **Idempotency** prevents duplicate Kafka delivery from updating inventory more than once.
+- **Database transactions** keep inventory updates and processed-event tracking consistent.
+- **Retry + DLT** isolates repeatedly failing records without blocking normal event processing.
+- **Avro + Schema Registry** provides schema-based communication between producer and consumer.
+- **Prometheus + Grafana** provides runtime visibility and service-down alerting.
+- **Docker volumes** preserve Kafka and Grafana data across container recreation.
+## How to Run
+
+### Prerequisites
+
+- Java 17
+- Docker Desktop
+- Maven / Maven Wrapper
+- MySQL
+
+### 1. Start Infrastructure
+
+From the project root:
+
+```powershell
+docker compose up -d
+```
+
+This starts the Kafka cluster, Schema Registry, Prometheus, and Grafana.
+
+### 2. Start Inventory Service
+
+```powershell
+cd inventory-service
+.\mvnw.cmd spring-boot:run
+```
+
+`inventory-service` runs on port `8082`.
+
+### 3. Start Order Service
+
+Open another terminal:
+
+```powershell
+cd order-service
+.\mvnw.cmd spring-boot:run
+```
+
+### 4. Verify Monitoring
+
+Prometheus:
+
+```text
+http://localhost:9090
+```
+
+Grafana:
+
+```text
+http://localhost:3000
+```
+## Environment Setup
+
+The committed Docker Compose setup does not require SMTP credentials for normal Kafka, Schema Registry, Prometheus, or Grafana startup.
+
+For optional Grafana email-notification testing, a safe placeholder template is kept in:
+
+```text
+.env.example
+```
+
+The current `docker-compose.yml` keeps:
+
+```yaml
+GF_SMTP_ENABLED: "false"
+```
+
+so SMTP is **disabled by default** and the placeholder values are not consumed unless SMTP configuration is explicitly wired back into the local Compose setup.
+
+Never commit a real Gmail App Password, Docker Hub token, webhook secret, or any other credential.
+
+## Screenshots
+
+### Prometheus Target Health
+![Prometheus Target UP](docs/screenshots/prometheus-target-up.png)
+
+### Grafana Monitoring Dashboard
+![Grafana Monitoring Dashboard](docs/screenshots/grafana-monitoring-dashboard.png)
+
+### Service Down Alert
+![Grafana Alert Firing](docs/screenshots/grafana-alert-firing.png)
+
+### Service Recovery
+![Grafana Alert Resolved](docs/screenshots/grafana-alert-resolved.png)
